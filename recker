@@ -1,0 +1,1314 @@
+#!/bin/bash
+
+## @name recker
+## @description Docker tiny helper $Id$
+## @author HiLoTECH
+## @url http://www.hilotech.jp/
+## @date 2015/04/01
+set -e
+set -u
+
+DEBUG="${DEBUG-}"
+VERBOSE="${VERBOSE-}"
+[[ -n "${VERBOSE-}" ]] \
+    && set -v
+
+readonly _VERSION='0.6.1'
+readonly _RECKER_ABS=$( readlink -f $0 )
+readonly _RECKER="${_RECKER_ABS##*/}"
+
+mapfile _USAGE <<'_EOF_'
+NAME
+  Recker - Docker command helper
+
+SYNOPSIS
+  recker [subcommand] [options] other_arguments
+
+DESCRIPTION
+  Recker gives you short-hands for Docker's complex commands. At the same
+  time it becomes a character-based-GUI interface for manipulating Docker
+  images and containers. Main features are:
+    * Character-based-GUI selecting function for containers/images
+    * Command line auto-complete-definition for Bash
+    * Scaffold function for building images
+    * HTTP/SSH port auto-mapper for running containers
+
+PREREQUISITES
+  * Docker
+    Version>=1.6.0
+  * Percol
+    Python-based CUI selection helper. https://github.com/mooz/percol
+  * Bash
+    Version>=4
+
+SUBCOMMANDS
+  images | images-a
+    Show docker local images. Docker's too long output lines are trimmed
+    suitable for your terminal width. 'images-a' works same as 'images'
+    but '-a' option (show all images) will be applied.
+  ps | ps-a
+    Show docker containers.
+  rmi | rmi-a
+    Remove docker images.
+  stop | stop-a
+    Stop containers.
+  kill | kill-a
+    Kill containers.
+  stop-rm | stop-rm-a
+    Stop containers and remove them.
+  kill-rm | kill-rm-a
+    Kill containers and remove them.
+  top
+    Show running processes of a container.
+  run
+    Select an image/context directory and run the container.
+  scaffold
+    Make a context directory's scaffold for building Docker image.
+  build
+    Select a context directory made by 'scaffold' and build the image.
+  select-containers | select-containers-a
+    Select containers and display its' names.
+  select-images | select-images-a
+    Select images and display its' names.
+  bashcompletion
+    Print defining script of bash completion for Recker.
+    For temporarily use do like this:
+        $ source <(recker bashcompletion)
+  cut
+    Cut off the output of Docker which spews too long lines. Suitable
+    for your terminal width.
+        Example:
+            $ docker foo bar | recker cut
+  usage | help | man
+    Show this message.
+  version
+    Print this Recker's version.
+  
+SUPPORTED OS
+  * Linux
+    I tested only CentOS 6, 7...
+
+_EOF_
+
+# Use /etc/recker/recker.conf or ~.recker/recker.conf to override
+# Shell script variable-definition format such as:
+# DOCKER_ENTERING_COMMAND='/bin/zsh'
+declare -A _CONF=(
+    [DIR_CONF_GLOBAL]='/etc/recker'
+    [DIR_CONF_USERS]='.recker'
+    [FILE_CONFIG]='recker.conf'
+    [DIR_DOCKER_BASE_GLOBAL]='/var/docker'
+    [DIR_DOCKER_BASE_USERS]='Docker'
+    [DIR_DOCKER_DOCKERFILES]='Dockerfiles'
+    [DIR_DOCKER_VOLUMES]='volumes'
+    [DOCKER_BUILD_OPT]='--force-rm --rm=true --no-cache=true '
+    [DOCKER_BUILD_BASE_IMG]='centos:centos6'
+#   [DOCKER_MAINTAINER_NAME]='hilotech'
+    [DOCKER_ENTRY_EXECUTABLE]='/bin/bash'
+    [DOCKER_ENTERING_COMMAND]='/bin/bash'
+    [DOCKER_SERVICE_ENTRYPOINT]='/etc/container_init.sh'
+    [DOCKER_RUN_SWITCH_BG]='-dt'
+    [DOCKER_RUN_SWITCH_FG]='-it --rm=true'
+    [DEVICE_NET]='docker0'
+    [AUTOMAP_PORT_HTTP_FROM]=8000
+    [AUTOMAP_PORT_SSH_FROM]=2200
+    [EXEC_DOCKER]='docker'
+    [EXEC_PERCOL]='percol'
+)
+
+declare -r -a _SUB_COMMANDS=(
+    'build' 'run' 'run-fg' 'run-bg' 
+    'scaffold' 'enter'
+    'images' 'images-a' 'ps' 'ps-a' 'top'
+    'rmi' 'rmi-a'
+    'stop' 'stop-a' 'kill' 'kill-a'
+    'stop-rm' 'stop-rm-a' 'rm' 'kill-rm' 'kill-rm-a'
+    'stop-all-containers' 'kill-all-containers' 'rm-all-containers'
+    'destroy-all-containers'
+    'select-images' 'select-images-a'
+    'select-containers' 'select-containers-a'
+    'usage' 'help' 'man' 'version' 'cut'
+    'bashcompletion'
+    'install-percol'
+    '_comp'
+)
+
+function _caution() {
+    echo -e "\e[31m$@\e[m" >&2
+}
+
+function _mention() {
+    echo -e "\e[34m$@\e[m" >&2
+}
+
+function _warn() {
+    echo -e "\e[31m$@\e[m" >&2
+}
+
+function _die() {
+    echo -e "\e[31m$@\e[m" >&2
+    exit 1
+}
+
+function _sureYesOrNo() {
+    _caution "$@ [y/n]"
+    local i
+    while read i
+    do
+        i="${i-}"
+        i="${i,,}"
+        if [[ "${i-}" =~ ^[yn]$ ]]; then
+            echo "${i-}"
+            break
+        fi
+    done
+}
+
+function _noExecP() {
+    if which "${1-}" >& /dev/null; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+function _noExecThenDie() {
+    _noExecP "$1" && \
+        _die "[Error] $1 not found in your PATH"
+    return 0
+}
+
+# Usage: local -A __opts=`_getOptsArray --hoge=fuga --age=uge`
+#        to get the value: ${__opts["hoge"]}
+function _getOptsArray() {
+    local __name=''
+    local __value=''
+    local __declaration=''
+    local -A __opts
+    for OPT in "$@"
+    do
+        __name=${OPT%%=*}
+        __name=${__name#--}
+        [[ -z "$__name" ]] && continue
+        __value=${OPT#*=}
+        __declaration="$__declaration[\"$__name\"]=\"$__value\" "
+    done
+    
+    __declaration="( $__declaration)"
+    echo $__declaration
+}
+
+function _getEuid() {
+    echo $(id -u)
+}
+
+function _makeSureDir() {
+    [[ -d "$1" ]] && return 0
+    mkdir -p "$1"
+    return "$?"
+}
+
+function _initGlobal() {
+    [[ $(_getEuid) -ne 0 ]] && return 1
+
+    local _confDir=${_CONF[DIR_CONF_GLOBAL]}
+    _makeSureDir $_confDir
+    [[ ! -r "$_confDir/${_CONF[FILE_CONFIG]}" ]] && \
+        touch "$_confDir/${_CONF[FILE_CONFIG]}"
+    local _baseDir=${_CONF[DIR_DOCKER_BASE_GLOBAL]}
+    _makeSureDir $_baseDir
+    _makeSureDir "$_baseDir/${_CONF[DIR_DOCKER_VOLUMES]}"
+    _makeSureDir "$_baseDir/${_CONF[DIR_DOCKER_DOCKERFILES]}"
+}
+
+function _initUserland() {
+    [[ $(_getEuid) -eq 0 ]] && return 1
+
+    local _confDir="$HOME/${_CONF[DIR_CONF_USERS]}"
+    _makeSureDir $_confDir
+    [[ ! -r "$_confDir/${_CONF[FILE_CONFIG]}" ]] && \
+        touch "$_confDir/${_CONF[FILE_CONFIG]}"
+    _makeSureDir "${_CONF[DIR_DOCKER_BASE_THISUSER]}"
+    _makeSureDir "${_CONF[DIR_DOCKER_DOCKERFILES_THISUSER]}"
+    _makeSureDir "${_CONF[DIR_DOCKER_VOLUMES_THISUSER]}"
+}
+
+function _setExecs() {
+    _PERCOL=${_CONF[EXEC_PERCOL]}
+    _DOCKER=${_CONF[EXEC_DOCKER]}
+}
+
+function _getOSName() {
+    local _result=''
+    uname >& /dev/null || return 1
+    _result=$( uname )
+    echo "${_result-}"
+}
+
+function _getDistName() {
+    # TODO: consult /etc/os-release and/or lsb_release too.
+    local _name
+    local i
+    for i in debian fedora redhat gentoo arch SuSE
+    do
+        if [[ \
+            -e "/etc/${i-}-release" \
+            || -e "/etc/${i-}_release" \
+            || -e "/etc/${i-}_version" \
+        ]]; then
+            _name="${i-}"
+            break
+        fi
+    done
+    [[ ! "${_name-}" ]] && return 1
+    [[ "${_name-}" = 'redhat' ]] \
+        && grep -q 'CentOS' /etc/redhat-release >& /dev/null \
+        && _name='centos'
+    [[ "${_name-}" = 'debian' ]] \
+        && lsb_release -si >& /dev/null \
+        && [[ "$(lsb_release -si)" = "Ubuntu" ]] \
+        && _name='ubuntu'
+    echo "${_name,,}"
+}
+
+function _checkEnvironment() {
+    [[ ! "${BASH_VERSION-}" ]] && \
+        _die '[Error] This program needs BASH'
+    local bashMajorVersion=${BASH_VERSION%%.*}
+    [[ $bashMajorVersion -lt 4 ]] &&  \
+        _die '[Error] This program needs BASH 4.x over'
+    local i
+    for i in docker; # $_PERCOL
+    do
+        _noExecThenDie "$i"
+    done
+}
+
+function _init() {
+    _setExecs
+    _checkEnvironment
+    _initGlobal || _initUserland || :
+}
+
+function _showUsage(){
+    printf %s "${_USAGE[@]}"
+}
+
+function _getHostIPv4() {
+    echo $(ip route | grep "${_CONF[DEVICE_NET]}" | awk '{print $9}')
+}
+
+
+###
+### read config files
+### 
+_confFiles=( \
+    "${_CONF[DIR_CONF_GLOBAL]}/${_CONF[FILE_CONFIG]}" \
+)
+[[ $(_getEuid) -eq 0 ]] \
+    || _confFiles+=( "$HOME/${_CONF[DIR_CONF_USERS]}/${_CONF[FILE_CONFIG]}" )
+for i in "${_confFiles[@]}"
+do
+    _confFile="${i-}"
+    [[ -r "${_confFile-}" ]] && \
+        source <( \
+            grep '^[A-Z0-9_]\{1,\}=.*$' "${_confFile-}" \
+            | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_CONF[\1]\2|' \
+        )
+done
+
+if [[ $(_getEuid) -ne 0 ]]; then
+    # DIR_DOCKER_BASE_THISUSER
+    _CONF[DIR_DOCKER_BASE_THISUSER]="${_CONF[DIR_DOCKER_BASE_USERS]}"
+    [[ ! "${_CONF[DIR_DOCKER_BASE_THISUSER]}" =~ ^/ ]] \
+        && _CONF[DIR_DOCKER_BASE_THISUSER]="$HOME/${_CONF[DIR_DOCKER_BASE_USERS]}"
+
+    # DIR_DOCKER_DOCKERFILES_THISUSER
+    _CONF[DIR_DOCKER_DOCKERFILES_THISUSER]="${_CONF[DIR_DOCKER_DOCKERFILES]}"
+    [[ ! "${_CONF[DIR_DOCKER_DOCKERFILES_THISUSER]}" =~ ^/ ]] \
+        && _CONF[DIR_DOCKER_DOCKERFILES_THISUSER]="${_CONF[DIR_DOCKER_BASE_THISUSER]}/${_CONF[DIR_DOCKER_DOCKERFILES_THISUSER]}"
+
+    # DIR_DOCKER_VOLUMES_THISUSER
+    _CONF[DIR_DOCKER_VOLUMES_THISUSER]="${_CONF[DIR_DOCKER_VOLUMES]}"
+    [[ ! "${_CONF[DIR_DOCKER_VOLUMES_THISUSER]}" =~ ^/ ]] \
+        && _CONF[DIR_DOCKER_VOLUMES_THISUSER]="${_CONF[DIR_DOCKER_BASE_THISUSER]}/${_CONF[DIR_DOCKER_VOLUMES_THISUSER]}"
+fi
+
+
+###
+### initial check
+###
+
+_init
+
+
+##
+## subcommands
+##
+function _recker-cut() {
+    local curentWidth=$(tput cols)
+    local suitableWidth=$((curentWidth-1))
+    cat - | cut -b -$suitableWidth
+}
+
+function _recker-images() {
+    local opt=''
+    if [[ "${1-}" = '-a' ]]; then
+        opt='-at'
+        shift
+    fi
+    ${_DOCKER-} images $opt 2> /dev/null | _recker-cut
+}
+
+function _recker-images-a() {
+    _recker-images -a
+}
+
+function _recker-ps() {
+    local opt=''
+    if [[ "${1-}" = '-a' ]]; then
+        opt='-a'
+        shift
+    fi
+    ${_DOCKER-} ps $opt $@ | _recker-cut
+}
+
+function _recker-ps-a() {
+    _recker-ps -a "$@"
+}
+
+function _recker-version() {
+    echo "Recker version $_VERSION"
+}
+
+function _recker-usage(){
+    _showUsage
+}
+
+function _recker-help(){
+    _recker-usage
+}
+
+function _recker-man(){
+    _recker-usage
+}
+
+###
+### subcommand for scaffolding
+###
+
+### template: Dockerfile
+mapfile _T_DOCKERFILE <<'_EOF_'
+FROM %%BASE_IMAGE%%
+ADD _upload /tmp/_upload
+ADD container_build.sh /tmp/container_build.sh
+RUN \
+    echo -e "#!/bin/bash\n\
+FN=/etc/container_services.sh\n\
+[[ -f \${FN-} ]] \
+    && grep -v \'^#\' \${FN-} \
+        | grep -q -v \'^[[:blank:]]\{0,\}$\' \
+    || \${FN-}\n\
+while true; do sleep 10; done\n\
+" > /etc/container_init.sh
+RUN \
+    chmod +x /etc/container_init.sh /tmp/container_build.sh \
+    && /tmp/container_build.sh \
+    && /bin/rm /tmp/container_build.sh \
+    && /bin/rm -r /tmp/_upload
+_EOF_
+
+### template: container_build.sh
+mapfile _T_CONTAINER_BUILD_SH <<'_EOF_'
+#!/bin/bash
+
+# some basic settings for CentOS
+echo 'ZONE="Asia/Tokyo"' > /etc/sysconfig/clock
+/bin/rm /etc/localtime
+ln -fs /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
+echo '[[ "${PS1-}" ]] && PS1=":D $PS1"' >> /etc/bashrc
+
+# Write here how to build container
+
+_EOF_
+
+### template: config.sh
+mapfile _T_CONFIG_SH <<'_EOF_'
+RUN_AS_SERVICE=
+EXEC=
+AUTOMAP_PORT_HTTP=
+AUTOMAP_PORT_SSH=
+VOLUMES=
+PORTS=
+LINKS=
+BASE_IMAGE=
+_EOF_
+
+### template: pre_build.sh
+mapfile _T_PRE_BUILD_SH <<'_EOF_'
+#!/bin/bash
+
+# Write here pre-build process
+
+_EOF_
+
+### template: post_build.sh
+mapfile _T_POST_BUILD_SH <<'_EOF_'
+#!/bin/bash
+
+# Write here post-build process
+
+_EOF_
+
+### template: container_services.sh 
+mapfile _T_CONTAINER_SERVICES_SH <<'_EOF_'
+#!/bin/bash
+
+# Write here sctript for spawning services in the container
+
+# exapmle:
+#service rsyslog start
+#service crond start
+#service postfix start
+_EOF_
+
+function _recker-scaffold(){
+    local _name=''
+    local i
+
+    if [[ "${1-}" ]]; then
+        _name="${1-}"
+        shift
+    else
+        _warn "specify name for scaffolding new Dockerfile"
+        return 1
+    fi
+
+    local _context="${_CONF[DIR_DOCKER_BASE_GLOBAL]-}/${_CONF[DIR_DOCKER_DOCKERFILES]-}/${_name-}"
+    [[ $(_getEuid) -ne 0 ]] \
+        && _context="${_CONF[DIR_DOCKER_DOCKERFILES_THISUSER]-}/${_name-}"
+
+    if [[ -d "${_context-}" ]]; then
+        _warn "that context already exists: ${_context-}"
+        return 1
+    fi
+
+    local _imgName="${_name-}"
+    local _maintainerName="${USER-}"
+    [[ -n "${_CONF[DOCKER_MAINTAINER_NAME]-}" ]] \
+        && _maintainerName="${_CONF[DOCKER_MAINTAINER_NAME]}"
+
+    local -A _ICONF
+    local _imgConfigFile="${_context-}/config.sh"
+    if [[ -r "${_imgConfigFile-}" ]]; then
+        source <( \
+            grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
+            | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
+        )
+    fi
+
+    for i in _upload
+    do
+        _makeSureDir "${_context-}/$i"
+    done
+    local _fn=''
+    local _tn=''
+    local _t=''
+    local _key=''
+    local -A _VARS=(
+        [BASE_IMAGE]="${_CONF[DOCKER_BUILD_BASE_IMG]-}"
+    )
+    [[ -n "${_ICONF[BASE_IMG]-}" ]] \
+        && _VARS[BASE_IMAGE]="${_ICONF[BASE_IMG]-}"
+    for i in \
+        Dockerfile container_build.sh config.sh \
+        pre_build.sh post_build.sh \
+        container_services.sh \
+        ;
+    do
+        _fn=$i
+        _tn="${i//./_}"
+        _tn="_T_${_tn^^}"
+        _t=$( eval "printf %s \"\${${_tn-}[@]}\"" )
+        for _key in "${!_VARS[@]}"
+        do
+            _t="${_t//%%${_key-}%%/${_VARS[${_key-}]-}}"
+        done
+        echo "${_t-}" > "${_context-}/${_fn-}"
+        [[ "${_fn-}" = 'Dockerfile' || "${_fn-}" = 'config.sh' ]] \
+            || chmod +x "${_context-}/${_fn-}"
+    done
+    _mention "scaffolding completed in context: ${_context-}"
+}
+
+
+###
+### subcommands depends on percol
+###
+function _recker-build() {
+    local _context=''
+
+    if [[ "${1-}" ]]; then
+        _context="${1-}"
+        shift
+        if [[ \
+            -d "${_context-}" \
+            && "${_context-}" =~ ^[^/] \
+        ]]; then
+            _context=$(cd ${_context-} && pwd)
+        fi
+    else
+        _context=$( \
+            ${_RECKER_ABS-} _comp dockerfiles \
+            | ${_PERCOL-} --prompt='Recker build' \
+        )
+    fi
+
+    if [[ ! "${_context-}" ]]; then
+        _warn "specify context directory..."
+        return 1
+    fi
+    local _howMany=(${_context-})
+    if [[ ${#_howMany[@]} -gt 1 ]]; then
+        _warn "too much target to build..."
+        return 1
+    fi
+    if [[ ! -d "${_context-}" ]]; then
+        _warn "no such context directory..."
+        return 1
+    fi
+
+    local -A _ICONF
+    local _imgConfigFile="${_context-}/config.sh"
+    if [[ -r "${_imgConfigFile-}" ]]; then
+        source <( \
+            grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
+            | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
+        )
+    fi
+
+    local _imgName="${_context##*/}"
+    local _maintainerName="${USER-}"
+    [[ -n "${_CONF[DOCKER_MAINTAINER_NAME]-}" ]] \
+        && _maintainerName="${_CONF[DOCKER_MAINTAINER_NAME]}"
+
+    _mention "Started building: ${_context-}..."
+    local _fn="${_context-}/pre_build.sh"
+    if [[ -x "${_fn-}" ]]; then
+        _mention "running pre_build.sh..."
+        ${_context-}/pre_build.sh
+    fi
+    _mention "running 'docker build'..."
+    ${_DOCKER-} build \
+        ${_CONF[DOCKER_BUILD_OPT]} \
+        -t "${_maintainerName-}/${_imgName-}" \
+        ${_context-}
+    _fn="${_context-}/post_build.sh"
+    if [[ -x "${_fn-}" ]]; then
+        _mention "running post_build.sh..."
+        ${_context-}/post_build.sh
+    fi
+    _mention "build has completed."
+}
+
+function _recker-RUN-FGorBG() {
+    local i
+    local _action=''
+    local _switchFgBg='-dt'
+    if [[ "${1-}" =~ ^(fg|bg)$ ]]; then
+        _action="${1-}"
+        shift
+        [[ "${_action-}" = 'fg' ]] \
+            && _switchFgBg='-it --rm=true'
+    else
+        _die "[Error] Unknown action? ${1-}"
+    fi
+
+    local _context=''
+    if [[ "${1-}" ]]; then
+        _context="${1-}"
+        shift
+        if [[ \
+            -d "${_context-}" \
+            && "${_context-}" =~ ^[^/] \
+        ]]; then
+            _context=$(cd ${_context-} && pwd)
+        fi
+    else
+        _context=$( \
+            ${_RECKER_ABS-} _comp dockerfile-and-images-name \
+            | ${_PERCOL-} --prompt='Recker run' \
+        )
+    fi
+
+    if [[ ! "${_context-}" ]]; then
+        _warn "specify context directory or image name..."
+        return 1
+    fi
+    local _howMany=(${_context-})
+    if [[ ${#_howMany[@]} -gt 1 ]]; then
+        _warn "too much target to run..."
+        return 1
+    fi
+
+    local _maintainerName="${USER-}"
+    [[ -n "${_CONF[DOCKER_MAINTAINER_NAME]-}" ]] \
+        && _maintainerName="${_CONF[DOCKER_MAINTAINER_NAME]}"
+    local _imgName="${_context-}"
+    local _imgToExec=''
+    local _isUnderRecker=0
+    local _imgConfigFile=''
+    local -A _ICONF
+    if [[ -d "${_imgName-}" ]]; then
+        _imgName="${_imgName##*/}"
+        _imgToExec="${_maintainerName-}/${_imgName-}"
+        _isUnderRecker=1
+        _imgConfigFile="${_context-}/config.sh"
+        if [[ -r "${_imgConfigFile-}" ]]; then
+            source <( \
+                grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
+                | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
+            )
+        fi
+    else
+        _imgToExec="${_imgName-}"
+        _imgName="${_imgName//\//_}"
+        _imgName="${_imgName//:/_}"
+    fi
+
+    if \
+        ${_RECKER_ABS-} _comp images-name \
+        | grep -q "${_imgToExec-}" >& /dev/null
+    then
+        :
+    else
+        _warn "no such image built or available..."
+        return 1
+    fi
+
+    local _containerName="${_imgName-}"
+    local _regexGetDockerCName='s|^\([^[:blank:]]\{1,\}\)[[:blank:]].*[[:blank:]]\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}$|\2|'
+    local _count=0
+    while true
+    do
+        if ${_DOCKER-} ps -a \
+            | tail -n +2 \
+            | sed -e "$_regexGetDockerCName" \
+            | grep -q "^${_containerName-}$" >& /dev/null
+        then
+            :
+        else
+            break
+        fi
+        _count=$(( _count + 1 ))
+        _containerName="${_imgName-}-${_count}"
+    done
+
+    local _executable=''
+    local _entryPoint=$( \
+        ${_DOCKER-} inspect \
+            --format='{{range .Config.Entrypoint }}{{println .}}{{end}}' \
+            "${_imgToExec-}" \
+    )
+    if [[ ! "${_entryPoint-}" ]]; then
+        _executable="${_CONF[DOCKER_ENTRY_EXECUTABLE]-}"
+        if [[ \
+            ${_isUnderRecker-} -eq 1 \
+            && -n "${_ICONF[EXEC]-}" \
+        ]]; then
+            _executable="${_ICONF[EXEC]-}"
+        fi
+    fi
+
+    local _ports=''
+    local _volumes=''
+    local _links=''
+    if [[ "${_ICONF[VOLUMES]-}" ]]; then
+        for i in ${_ICONF[PORTS]-}
+        do
+            _ports+="-p $i "
+        done
+    fi
+    if [[ "${_ICONF[LINKS]-}" ]]; then
+        for i in ${_ICONF[LINKS]-}
+        do
+            _links+="--link $i:$i "
+        done
+    fi
+    local _contextLastElem="${_context##*/}"
+    local _baseDir="${_CONF[DIR_DOCKER_BASE_GLOBAL]-}/${_CONF[DIR_DOCKER_VOLUMES]-}/${_contextLastElem-}"
+    [[ $(_getEuid) -ne 0 ]] \
+        && _baseDir="${_CONF[DIR_DOCKER_VOLUMES_THISUSER]-}/${_contextLastElem-}"
+    local _localDir=''
+    if [[ "${_ICONF[VOLUMES]-}" ]]; then
+        for i in ${_ICONF[VOLUMES]-}
+        do
+            _localDir="${_baseDir-}$i"
+            if _makeSureDir ${_localDir-}; then
+                :
+            else
+                _warn "Can't make directory : ${_localDir-}"
+                return 1
+            fi
+            _volumes+="-v ${_localDir-}:$i:rw "
+        done
+    fi
+
+    function __findUnusedPortFrom() {
+        local _cur=${1-}
+        local _listeningPorts=":$( \
+            ss -ant \
+            | tail -n +2 \
+            | sed -e 's|^.*:\([0-9]\{1,\}\)[[:blank:]].*$|\1|' \
+            | sort -n \
+            | uniq \
+            | tr '\n' ':' \
+        )"
+        while true
+        do
+            [[ $_listeningPorts =~ :${_cur-}: ]] \
+                || break
+            _cur=$(( _cur + 1 ))
+            [[ ${_cur-} -gt 65535 ]] \
+                && return 1
+        done
+        echo "${_cur-}"
+        return 0
+    }
+    local _result
+    if [[ "${_ICONF[AUTOMAP_PORT_HTTP]-}" ]]; then
+        _result=$( __findUnusedPortFrom ${_CONF[AUTOMAP_PORT_HTTP_FROM]-} )
+        _mention "HTTP port auto-mapped to: ${_result-}"
+        _ports="${_ports-} -p ${_result-}:80 "
+    fi
+    if [[ "${_ICONF[AUTOMAP_PORT_SSH]-}" ]]; then
+        _result=$( __findUnusedPortFrom ${_CONF[AUTOMAP_PORT_SSH_FROM]-} )
+        _mention " SSH port auto-mapped to: ${_result-}"
+        _ports="${_ports-} -p ${_result-}:22 "
+    fi
+
+    if [[ "${_ICONF[RUN_AS_SERVICE]-}" -eq 1 ]]; then
+        [[ "${_switchFgBg-}" != "${_CONF[DOCKER_RUN_SWITCH_BG]-}" ]] \
+            && _mention 'Changed mode to background because of declaration RUN_AS_SERVICE'
+        _switchFgBg="${_CONF[DOCKER_RUN_SWITCH_BG]-}"
+        [[ -z "${_ICONF[EXEC]-}" ]] \
+            && _executable="${_CONF[DOCKER_SERVICE_ENTRYPOINT]-}"
+    fi
+
+    ${_DOCKER-} run \
+        ${_switchFgBg-} \
+        --add-host="dockerhost:$(_getHostIPv4)" \
+        -e DOCKER_HOST_IP="$(_getHostIPv4)" \
+        --name="${_containerName-}" \
+        ${_ports-} \
+        ${_links-} \
+        ${_volumes-} \
+        "${_imgToExec-}" \
+        ${_executable-}
+}
+
+function _recker-run-fg() {
+    _recker-RUN-FGorBG fg "$@"
+}
+
+function _recker-run-bg() {
+    _recker-RUN-FGorBG bg "$@"
+}
+
+function _recker-run() {
+    _recker-run-fg "$@"
+}
+
+function _recker-rmi() {
+    local cids=''
+    local opt=''
+    if [[ "${1-}" = '-a' ]]; then
+        opt='-a'
+        shift
+    fi
+    if [[ "$@" ]]; then
+        cids="$@"
+    else
+        cids=$( \
+            echo "$( \
+                ${_DOCKER-} images $opt -t 2> /dev/null \
+                    | sed -e 's|^|:|' \
+                    | $_PERCOL  --prompt='Recker rmi' \
+                )" \
+            | tac \
+            | sed -e 's|^:[^0-9a-z]\{1,\}\([0-9a-z]\{1,\}\) .*$|\1|' \
+        )
+        #cids=$( echo "$( \
+        #    ${_DOCKER-} images $opt \
+        #    | $_PERCOL  --prompt='Recker rmi' \
+        #    )" | awk '{print $3}' )
+    fi
+    if [[ ! "${cids-}" ]]; then
+        _warn "specify image ids..."
+        return 1
+    fi
+    _mention "Removing docker images: $cids..."
+    local _i=''
+    for i in $cids
+    do
+        ${_DOCKER-} rmi "$i"
+    done
+}
+
+function _recker-rmi-a() {
+    _recker-rmi '-a'
+}
+
+function _recker-STOPorKILLorRM() {
+    local cid=''
+    local action=''
+    local opt=''
+    
+    if [[ "${1-}" =~ ^(stop|kill|rm)$ ]]; then
+        action="$1"
+        shift
+    else
+        _die "[Error] Unknown action? ${1-}"
+    fi
+    if [[ "${1-}" = '-a' ]]; then
+        opt='-a'
+        shift
+    fi
+    if [[ "$@" ]]; then
+        cid="$@"
+    else
+        cid=$(echo "$( ${_DOCKER-} ps $opt \
+            | $_PERCOL --prompt=Recker\ ${action-} )" | awk '{print $1}')
+    fi
+    if [[ ! "${cid-}" ]]; then
+        _warn "specify container id..."
+        return 1
+    fi
+    _mention "Started to ${action} docker containers: ${cid}..."
+    ${_DOCKER-} $action $cid
+}
+function _recker-stop() {
+    _recker-STOPorKILLorRM stop "$@"
+}
+function _recker-stop-a() {
+    _recker-STOPorKILLorRM stop -a "$@"
+}
+function _recker-kill() {
+    _recker-STOPorKILLorRM kill "$@"
+}
+function _recker-kill-a() {
+    _recker-STOPorKILLorRM kill -a "$@"
+}
+function _recker-rm() {
+    _recker-STOPorKILLorRM rm -a "$@"
+}
+
+function _recker-STOPorKILL-rm() {
+    local cid=''
+    local action=''
+    local opt=''
+    
+    if [[ "${1-}" =~ ^(stop|kill)$ ]]; then
+        action="$1"
+        shift
+    else
+        _die "[Error] Unknown action? ${1-}"
+    fi
+    if [[ "${1-}" = '-a' ]]; then
+        opt='-a'
+        shift
+    fi
+    if [[ "$@" ]]; then
+        cid="$@"
+    else
+        cid=$(echo "$( ${_DOCKER-} ps $opt \
+            | $_PERCOL --prompt=Recker\ ${action-}-rm )" | awk '{print $1}')
+    fi
+    if [[ ! "${cid-}" ]]; then
+        _warn "specify container id..."
+        return 1
+    fi
+    _mention "Started to ${action} and remove docker containers: ${cid}..."
+    ( ${_DOCKER-} $action $cid && ${_DOCKER-} rm $cid )
+}
+function _recker-stop-rm() {
+    _recker-STOPorKILL-rm stop "$@"
+}
+function _recker-stop-rm-a() {
+    _recker-STOPorKILL-rm stop -a "$@"
+}
+function _recker-kill-rm() {
+    _recker-STOPorKILL-rm kill "$@"
+}
+function _recker-kill-rm-a() {
+    _recker-STOPorKILL-rm kill -a "$@"
+}
+function _recker-STOPorKILLorRMorDESTROY-all-containers() {
+    local cid=''
+    local action=''
+    local opt=''
+    
+    if [[ "${1-}" =~ ^(stop|kill)$ ]]; then
+        action="$1"
+        shift
+        cid=$( ${_DOCKER-} ps -q )
+        [[ ! "${cid-}" ]] && return
+        _mention "Started to ${action} docker containers: ${cid}..."
+        ${_DOCKER-} $action $cid
+    elif [[ "${1-}" = 'rm' ]]; then
+        action="$1"
+        shift
+        cid=$( ${_DOCKER-} ps -a --filter=status=exit -q )
+        [[ ! "${cid-}" ]] && return
+        _mention "Started to ${action} docker containers: ${cid}..."
+        ${_DOCKER-} $action $cid
+    elif [[ "${1-}" = 'destroy' ]]; then
+        action="$1"
+        shift
+        _mention "Started to stop and rm all docker containers"
+        ( \
+            ${_DOCKER-} stop \
+                $( \
+                    ${_DOCKER-} ps -a \
+                        --filter=status=running \
+                        --filter=status=paused \
+                        --filter=status=restarting \
+                        -q \
+                ) \
+            && ${_DOCKER-} rm \
+                $( \
+                    ${_DOCKER-} ps -a \
+                        --filter=status=exit \
+                        -q \
+                ) \
+        )
+    else
+        _die "[Error] Unknown action? ${1-}"
+    fi
+}
+function _recker-stop-all-containers() {
+    _recker-STOPorKILLorRMorDESTROY-all-containers stop
+}
+function _recker-kill-all-containers() {
+    _recker-STOPorKILLorRMorDESTROY-all-containers kill
+}
+function _recker-rm-all-containers() {
+    _recker-STOPorKILLorRMorDESTROY-all-containers rm
+}
+function _recker-destroy-all-containers() {
+    _recker-STOPorKILLorRMorDESTROY-all-containers destroy
+}
+
+function _recker-enter() {
+    local _cid=''
+    
+    if [[ "${1-}" ]]; then
+        _cid="${1-}"
+    else
+        _cid=$(echo "$( ${_DOCKER-} ps \
+            | $_PERCOL --prompt='Recker enter' )" | awk '{print $1}')
+    fi
+    if [[ ! "${_cid-}" ]]; then
+        _warn "specify container id..."
+        return 1
+    fi
+    _mention "entering container: ${_cid-}..."
+    ${_DOCKER-} exec -it $_cid ${_CONF[DOCKER_ENTERING_COMMAND]}
+}
+
+function _recker-top() {
+    local _cid=''
+    
+    if [[ "${1-}" ]]; then
+        _cid="${1-}"
+    else
+        _cid=$(echo "$( ${_DOCKER-} ps \
+            | $_PERCOL --prompt='Recker top' )" | awk '{print $1}')
+    fi
+    if [[ ! "${_cid-}" ]]; then
+        _warn "specify container id..."
+        return 1
+    fi
+    ${_DOCKER-} top $_cid
+}
+
+function _recker-select-images() {
+    _opt=''
+    if [[ "${1-}" = '-a' ]]; then
+        _opt='-at'
+        shift
+    fi
+    local _cid=''
+    if [[ "$@" ]]; then
+        _cid="$@"
+    else
+        if [[ "${_opt-}" =~ t ]]; then
+            _cid=$(
+                echo "$( \
+                    ${_DOCKER-} images ${_opt-} 2> /dev/null \
+                    | sed -e 's|^|:|' \
+                    | $_PERCOL --prompt='Recker select-images' \
+                )" \
+                | tac \
+                | sed -e 's|^:[^0-9a-z]\{1,\}\([0-9a-z]\{1,\}\) .*$|\1|' \
+                | tr '\n' ' ' \
+            )
+        else
+            _cid=$(
+                echo "$( \
+                    ${_DOCKER-} images ${_opt-} \
+                    | $_PERCOL --prompt='Recker select-images' \
+                )" \
+                | awk '{print $1}' \
+                | tr '\n' ' ' \
+            )
+        fi
+    fi
+    if [[ ! "${_cid-}" ]]; then
+        _warn "specify image namr or id..."
+        return 1
+    fi
+    echo "${_cid-}"
+}
+function _recker-select-images-a() {
+    _recker-select-images -a
+}
+
+function _recker-select-containers() {
+    _opt=''
+    if [[ "${1-}" = '-a' ]]; then
+        _opt='-a'
+        shift
+    fi
+    local _cid=''
+    if [[ "$@" ]]; then
+        _cid="$@"
+    else
+        _cid=$(echo "$( ${_DOCKER-} ps ${_opt-} \
+            | $_PERCOL --prompt='Recker select-containers' )" \
+            | awk '{print $1}' \
+            | tr '\n' ' ' \
+        )
+    fi
+    if [[ ! "${_cid-}" ]]; then
+        _warn "specify container id..."
+        return 1
+    fi
+    echo "${_cid-}"
+}
+function _recker-select-containers-a() {
+    _recker-select-containers -a
+}
+
+###
+### some helper commands
+###
+
+function _recker-install-percol() {
+    if ! which $_PERCOL >& /dev/null ; then
+        :
+    else
+        _mention "$_PERCOL is already available"
+        exit 1
+    fi
+    if [[ $(_getEuid) -ne 0 ]]; then
+        _die 'Insufficient privileges. You must be root or execute me by sudo'
+    fi
+
+    if [[ \
+        'Linux' != "$(_getOSName)" \
+        || ! "$(_getDistName)" =~ ^(redhat|fedora|centos)$ \
+    ]]; then
+        _die ":( Sorry, I don't know how to install percol to your os..."
+    fi
+
+    local i
+    i="$( _sureYesOrNo 'You really want to install percol?' )"
+    if [[ "${i-}" = 'y' ]]; then
+        yum -y install python-setuptools && \
+        easy_install pip && \
+        pip install percol
+    fi
+}
+
+###
+### bash completion
+###
+
+mapfile _BASH_COMPLETION <<'_EOF_'
+# bash completion for recker ( independent from bash_completion )
+function _recker() {
+    local _RECKER='%%RECKER_ABS%%'
+    local cur
+    cur=${COMP_WORDS[COMP_CWORD]}
+    local _action=${COMP_WORDS[COMP_CWORD-1]}
+    local _list
+
+    COMPREPLY=()
+    if [[ $COMP_CWORD -le 1 ]]; then
+        _list=$( $_RECKER _comp commands )
+        COMPREPLY=( $(compgen -W "${_list-}" $cur) )
+        return 0
+    fi
+
+    case "${_action-}" in
+        stop|kill|stop-rm|kill-rm)
+            _list=$( $_RECKER _comp ps )
+            ;;
+        stop-a|kill-a|stop-rm-a|kill-rm-a)
+            _list=$( $_RECKER _comp ps-a )
+            ;;
+        rmi)
+            _list=$( $_RECKER _comp images )
+            ;;
+        rmi-a)
+            _list=$( $_RECKER _comp images-a )
+            ;;
+        build)
+            _list=$( $_RECKER _comp dockerfiles )
+            ;;
+        run|run-fg|run-bg)
+            _list=$( $_RECKER _comp dockerfile-and-images-name )
+            ;;
+        enter)
+            _list=$( $_RECKER _comp ps )
+            ;;
+        top)
+            _list=$( $_RECKER _comp ps )
+            ;;
+        select-images)
+            _list=$( $_RECKER _comp images )
+            ;;
+        select-containers)
+            _list=$( $_RECKER _comp ps )
+            ;;
+        select-images-a)
+            _list=$( $_RECKER _comp images-a )
+            ;;
+        select-containers-a)
+            _list=$( $_RECKER _comp ps-a )
+            ;;
+    esac
+    COMPREPLY=( $(compgen -W "${_list-}" $cur) )
+}
+complete -p | grep -q ' recker$' >& /dev/null \
+    && complete -r recker
+complete -o default -o bashdefault -F _recker recker
+_EOF_
+
+function _recker-bashcompletion() {
+    printf %s "${_BASH_COMPLETION[@]//%%RECKER_ABS%%/$_RECKER_ABS}"
+}
+# source <(recker bashcompletion)
+
+function _recker-_comp() {
+    local i
+    local _action="${1-}"
+    [[ "${_action-}" ]] || _die 'whats?'
+    shift
+
+    local _regexGetDockerCidName='s|^\([^[:blank:]]\{1,\}\)[[:blank:]].*[[:blank:]]\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}$|\1 \2|'
+    local _regexGetDockerImageName='s|^\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\).*$|\1:\2|'
+    local _regexGetDockerImageNameId='s|^\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\).*$|\1:\2 \3|'
+    local _regexGetDockerImageNameIdAll='s|^[^[:blank:]]\{1,\}[[:blank:]]\{1,\}[^[:blank:]]\{1,\}[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\).*$|\1|'
+
+    function __getDockerImageNameId() {
+        echo $( \
+            ${_DOCKER-} images \
+            | tail -n +2 \
+            | grep -v '<none>' \
+            | sed -e "$_regexGetDockerImageNameId" \
+        )
+    }
+
+    case "${_action-}" in
+        dockerfiles)
+            [[ \
+                $(_getEuid) -ne 0 \
+                && -d "${_CONF[DIR_DOCKER_DOCKERFILES_THISUSER]-}" \
+            ]] \
+                && find "${_CONF[DIR_DOCKER_DOCKERFILES_THISUSER]-}" \
+                    -mindepth 2 -maxdepth 2 -name 'Dockerfile' -type f \
+                | sed -e 's|/Dockerfile$||'
+            [[ \
+                -d "${_CONF[DIR_DOCKER_BASE_GLOBAL]-}/${_CONF[DIR_DOCKER_DOCKERFILES]-}" \
+                && -r "${_CONF[DIR_DOCKER_BASE_GLOBAL]-}/${_CONF[DIR_DOCKER_DOCKERFILES]-}" \
+            ]] \
+                && find "${_CONF[DIR_DOCKER_BASE_GLOBAL]-}/${_CONF[DIR_DOCKER_DOCKERFILES]-}" \
+                    -mindepth 2 -maxdepth 2 -name 'Dockerfile' -type f \
+                | sed -e 's|/Dockerfile$||'
+            ;;
+        commands)
+            for i in "${_SUB_COMMANDS[@]}";
+            do
+                [[ "${i-}" =~ ^_ ]] || echo "${i-}"
+            done
+            ;;
+        ps)
+            echo $( \
+                ${_DOCKER-} ps \
+                | tail -n +2 \
+                | sed -e "$_regexGetDockerCidName" \
+            )
+            ;;
+        ps-a)
+            echo $( \
+                ${_DOCKER-} ps -a \
+                | tail -n +2 \
+                | sed -e "$_regexGetDockerCidName" \
+            )
+            ;;
+        images)
+            __getDockerImageNameId
+            ;;
+        images-a)
+            __getDockerImageNameId
+            echo $( \
+                ${_DOCKER-} images -a \
+                | tail -n +2 \
+                | grep '<none>' \
+                | sed -e "$_regexGetDockerImageNameIdAll" \
+            )
+            ;;
+        images-name)
+            echo $( \
+                ${_DOCKER-} images \
+                | tail -n +2 \
+                | grep -v '<none>' \
+                | sed -e "$_regexGetDockerImageName" \
+            )
+            ;;
+        dockerfile-and-images-name)
+            cat \
+                <( ${_RECKER_ABS-} _comp dockerfiles ) \
+                <( ${_RECKER_ABS-} _comp images-name | sed -e 's|[[:blank:]]\{1,\}|\n|g' )
+            ;;
+        *)
+            _die "Unknown action: ${_action-}"
+            ;;
+    esac
+}
+
+###
+### command parsing
+###
+
+_candidates=''
+IFS='|' eval '_candidates="${_SUB_COMMANDS[*]}"'
+_subCommand="${1-}"
+shift
+if [[ "${_subCommand-}" =~ ^($_candidates)$ ]]; then
+    :
+elif [[ -n "${_subCommand-}" ]]; then
+    _mention "Calling docker with: $_subCommand"
+    ${_DOCKER-} ${_subCommand-} $@
+    exit $?
+fi
+
+if type -t _recker-$_subCommand | grep -q function; then
+    _recker-$_subCommand $@
+else
+    _warn "[Error] Unknown subcommand: ${_subCommand-}"
+    _showUsage
+    exit 1
+fi
