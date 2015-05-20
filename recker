@@ -402,13 +402,12 @@ mapfile _T_DOCKERFILE <<'_EOF_'
 FROM %%BASE_IMAGE%%
 ADD _upload /tmp/_upload
 ADD container_build.sh /tmp/container_build.sh
+ADD container_services.sh /etc/container_services.sh
 RUN \
     echo -e "#!/bin/bash\n\
-FN=/etc/container_services.sh\n\
-[[ -f \${FN-} ]] \
-    && grep -v \'^#\' \${FN-} \
-        | grep -q -v \'^[[:blank:]]\{0,\}$\' \
-    || \${FN-}\n\
+[[ -f /etc/container_services.sh ]] \
+    && chmod +x /etc/container_services.sh \
+    && /etc/container_services.sh \n\
 while true; do sleep 10; done\n\
 " > /etc/container_init.sh
 RUN \
@@ -503,6 +502,7 @@ function _recker-scaffold(){
     if [[ -r "${_imgConfigFile-}" ]]; then
         source <( \
             grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
+            | grep -v '^SET[[:blank:]]' \
             | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
         )
     fi
@@ -583,6 +583,7 @@ function _recker-build() {
     if [[ -r "${_imgConfigFile-}" ]]; then
         source <( \
             grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
+            | grep -v '^SET[[:blank:]]' \
             | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
         )
     fi
@@ -667,7 +668,13 @@ function _recker-RUN-FGorBG() {
         if [[ -r "${_imgConfigFile-}" ]]; then
             source <( \
                 grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
+                | grep -v '^SET[[:blank:]]' \
                 | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
+            )
+            local _envs=$( \
+                grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
+                | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|-e \1=\2|;' \
+                | tr '\n' ' ' \
             )
         fi
     else
@@ -723,7 +730,7 @@ function _recker-RUN-FGorBG() {
     local _ports=''
     local _volumes=''
     local _links=''
-    if [[ "${_ICONF[VOLUMES]-}" ]]; then
+    if [[ "${_ICONF[PORTS]-}" ]]; then
         for i in ${_ICONF[PORTS]-}
         do
             _ports+="-p $i "
@@ -780,11 +787,13 @@ function _recker-RUN-FGorBG() {
         _result=$( __findUnusedPortFrom ${_CONF[AUTOMAP_PORT_HTTP_FROM]-} )
         _mention "HTTP port auto-mapped to: ${_result-}"
         _ports="${_ports-} -p ${_result-}:80 "
+        _envs="${_envs-} -e AUTOMAP_PORT_HTTP=${_result-}"
     fi
     if [[ "${_ICONF[AUTOMAP_PORT_SSH]-}" ]]; then
         _result=$( __findUnusedPortFrom ${_CONF[AUTOMAP_PORT_SSH_FROM]-} )
         _mention " SSH port auto-mapped to: ${_result-}"
         _ports="${_ports-} -p ${_result-}:22 "
+        _envs="${_envs-} -e AUTOMAP_PORT_SSH=${_result-}"
     fi
 
     if [[ "${_ICONF[RUN_AS_SERVICE]-}" -eq 1 ]]; then
@@ -800,6 +809,7 @@ function _recker-RUN-FGorBG() {
         --add-host="dockerhost:$(_getHostIPv4)" \
         -e DOCKER_HOST_IP="$(_getHostIPv4)" \
         --name="${_containerName-}" \
+        ${_envs-} \
         ${_ports-} \
         ${_links-} \
         ${_volumes-} \
@@ -1296,7 +1306,8 @@ function _recker-_comp() {
 _candidates=''
 IFS='|' eval '_candidates="${_SUB_COMMANDS[*]}"'
 _subCommand="${1-}"
-shift
+shift || :
+
 if [[ "${_subCommand-}" =~ ^($_candidates)$ ]]; then
     :
 elif [[ -n "${_subCommand-}" ]]; then
@@ -1306,9 +1317,16 @@ elif [[ -n "${_subCommand-}" ]]; then
 fi
 
 if type -t _recker-$_subCommand | grep -q function; then
-    _recker-$_subCommand $@
-else
-    _warn "[Error] Unknown subcommand: ${_subCommand-}"
-    _showUsage
-    exit 1
+    _recker-$_subCommand $@ \
+        || exit "$?"
+    exit 0
 fi
+
+if [[ "${_subCommand-}" ]]; then
+    _warn "[Error] Unknown subcommand: ${_subCommand-}"
+else
+    _warn "[Error] Please specify subcommand"
+fi
+_showUsage
+exit 1
+
