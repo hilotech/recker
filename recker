@@ -1,10 +1,10 @@
 #!/bin/bash
 
 ## @name recker
-## @description Docker tiny helper $Id$
+## @description Docker tiny helper
 ## @author HiLoTECH
 ## @url http://www.hilotech.jp/
-## @date 2015/04/01
+## @since 2015/04/01
 set -e
 set -u
 
@@ -58,6 +58,14 @@ SUBCOMMANDS
     Stop containers and remove them.
   kill-rm | kill-rm-a
     Kill containers and remove them.
+  get-container-ip
+    Show container's IP address.
+  get-container-ports
+    Show container's mapped ports.
+  get-container-port-http | get-container-port-ssh
+    Same as get-container-ports, but only for http or ssh.
+  get-containers-names
+    Show the list of running container's names.
   top
     Show running processes of a container.
   run
@@ -114,6 +122,11 @@ declare -A _CONF=(
     [AUTOMAP_PORT_SSH_FROM]=2200
     [EXEC_DOCKER]='docker'
     [EXEC_PERCOL]='percol'
+    [EXEC_IP]='ip'
+    [EXEC_POSTMAP]='postmap'
+    [COMMAND_PRE_RUN]=''
+    [COMMAND_POST_RUN]='sleep 10 && recker get-containers-fqdn-and-port-smtp -p'
+    [POSTFIX_TRANSPORT]='/etc/postfix/transport-recker'
 )
 
 declare -r -a _SUB_COMMANDS=(
@@ -127,10 +140,25 @@ declare -r -a _SUB_COMMANDS=(
     'destroy-all-containers'
     'select-images' 'select-images-a'
     'select-containers' 'select-containers-a'
+    'get-container-ip'
+    'get-containers-fqdn-and-port-smtp'
+    'get-container-ports' 'get-container-port-http'
+    'get-container-port-ssh'
+    'get-containers-names' 'get-containers-names-and-port-http'
     'usage' 'help' 'man' 'version' 'cut'
     'bashcompletion'
     'install-percol'
     '_comp'
+)
+
+declare -r -A _QUERIES=(
+    [_DOCKER_INSPECT_PORTS]='{{range $key, $value := .HostConfig.PortBindings }}{{if $value }}{{ $key }}:{{ range $value }}{{ println .HostPort }}{{end}}{{end}}{{end}}'
+    [_DOCKER_INSPECT_IP]='{{ .NetworkSettings.IPAddress }}'
+)
+
+declare -r -A _SEDEXP=(
+    [GET_DOCKER_CNAME]='s|^[^[:blank:]]\{1,\}[[:blank:]].*[[:blank:]]\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}$|\1|'
+    [GET_DOCKER_CID_NAME]='s|^\([^[:blank:]]\{1,\}\)[[:blank:]].*[[:blank:]]\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}$|\1 \2|'
 )
 
 function _caution() {
@@ -236,6 +264,7 @@ function _initUserland() {
 function _setExecs() {
     _PERCOL=${_CONF[EXEC_PERCOL]}
     _DOCKER=${_CONF[EXEC_DOCKER]}
+    _POSTMAP=${_CONF[EXEC_POSTMAP]}
 }
 
 function _getOSName() {
@@ -579,6 +608,7 @@ function _recker-build() {
     fi
 
     local -A _ICONF
+    local -A _envs
     local _imgConfigFile="${_context-}/config.sh"
     if [[ -r "${_imgConfigFile-}" ]]; then
         source <( \
@@ -586,6 +616,16 @@ function _recker-build() {
             | grep -v '^SET[[:blank:]]' \
             | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
         )
+        source <( \
+            grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
+            | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|_envs[\1]=\2|;' \
+        )
+        _makeSureDir "${_context-}/_upload" || :
+        grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
+            | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1=\2|;' \
+            > "${_context-}/_upload/envs_onbuild.sh"
+        echo "DOCKER_HOST_IP=\"$(_getHostIPv4)\"" \
+            >> "${_context-}/_upload/envs_onbuild.sh"
     fi
 
     local _imgName="${_context##*/}"
@@ -597,7 +637,7 @@ function _recker-build() {
     local _fn="${_context-}/pre_build.sh"
     if [[ -x "${_fn-}" ]]; then
         _mention "running pre_build.sh..."
-        ${_context-}/pre_build.sh
+        ENVS_DEF=$(declare -p _envs) ${_context-}/pre_build.sh
     fi
     _mention "running 'docker build'..."
     ${_DOCKER-} build \
@@ -607,7 +647,7 @@ function _recker-build() {
     _fn="${_context-}/post_build.sh"
     if [[ -x "${_fn-}" ]]; then
         _mention "running post_build.sh..."
-        ${_context-}/post_build.sh
+        ENVS_DEF=$(declare -p _envs) ${_context-}/post_build.sh
     fi
     _mention "build has completed."
 }
@@ -708,7 +748,7 @@ function _recker-RUN-FGorBG() {
             break
         fi
         _count=$(( _count + 1 ))
-        _containerName="${_imgName-}-${_count}"
+        _containerName="${_imgName-}_${_count}"
     done
 
     local _executable=''
@@ -795,7 +835,6 @@ function _recker-RUN-FGorBG() {
         _ports="${_ports-} -p ${_result-}:22 "
         _envs="${_envs-} -e AUTOMAP_PORT_SSH=${_result-}"
     fi
-
     if [[ "${_ICONF[RUN_AS_SERVICE]-}" -eq 1 ]]; then
         [[ "${_switchFgBg-}" != "${_CONF[DOCKER_RUN_SWITCH_BG]-}" ]] \
             && _mention 'Changed mode to background because of declaration RUN_AS_SERVICE'
@@ -803,6 +842,21 @@ function _recker-RUN-FGorBG() {
         [[ -z "${_ICONF[EXEC]-}" ]] \
             && _executable="${_CONF[DOCKER_SERVICE_ENTRYPOINT]-}"
     fi
+
+    [[ "${DEBUG-}" ]] && cat <<_EOF_
+    ${_DOCKER-} run \
+        ${_switchFgBg-} \
+        --add-host="dockerhost:$(_getHostIPv4)" \
+        -e DOCKER_HOST_IP="$(_getHostIPv4)" \
+        --name="${_containerName-}" \
+        ${_envs-} \
+        ${_ports-} \
+        ${_links-} \
+        ${_volumes-} \
+        "${_imgToExec-}" \
+        ${_executable-}
+_EOF_
+    bash -c "${_CONF[COMMAND_PRE_RUN]-}"
 
     ${_DOCKER-} run \
         ${_switchFgBg-} \
@@ -815,6 +869,8 @@ function _recker-RUN-FGorBG() {
         ${_volumes-} \
         "${_imgToExec-}" \
         ${_executable-}
+
+    bash -c "${_CONF[COMMAND_POST_RUN]-}"
 }
 
 function _recker-run-fg() {
@@ -1043,7 +1099,7 @@ function _recker-top() {
 }
 
 function _recker-select-images() {
-    _opt=''
+    local _opt=''
     if [[ "${1-}" = '-a' ]]; then
         _opt='-at'
         shift
@@ -1085,7 +1141,7 @@ function _recker-select-images-a() {
 }
 
 function _recker-select-containers() {
-    _opt=''
+    local _opt=''
     if [[ "${1-}" = '-a' ]]; then
         _opt='-a'
         shift
@@ -1108,6 +1164,191 @@ function _recker-select-containers() {
 }
 function _recker-select-containers-a() {
     _recker-select-containers -a
+}
+
+function __getContainerIPInfo() {
+    local _target="${1-}"
+    if [[ -z "${_target-}" ]]; then
+        _warn 'specify container name...'
+        return 1
+    fi
+    local _inspect=$( \
+        docker inspect \
+            --format="${_QUERIES[_DOCKER_INSPECT_IP]-}" \
+            ${_target-} \
+            | tr -d '[:blank:]' \
+    )
+    echo "${_inspect-}" 
+    return
+}
+function _recker-get-container-ip() {
+    local _target="${1-}"
+    if [[ -z "${_target-}" ]]; then
+        _warn 'specify container name...'
+        return 1
+    fi
+    local _result=$( __getContainerIPInfo ${_target-} )
+    echo "${_result-}"
+    return
+}
+
+function __confirmAlivePortSMTP() {
+    local _ip="${1-}"
+    if [[ -z "${_ip-}" ]]; then
+        _warn 'specify IP addr...'
+        return 1
+    fi
+    local _port='25'
+    local _fqdn=$(
+        {
+            exec 3<> /dev/tcp/${_ip-}/${_port-}
+            echo -e 'HELO example.com\nQUIT\n' >&3
+            grep '^250 ' <&3 \
+                | sed \
+                        -e 's|^[0-9]\{1,\}[[:blank:]]\{1,\}||' \
+                        -e 's|[^0-9a-zA-Z.-]||g'
+        } 2> /dev/null
+    )
+    [[ -z "${_fqdn-}" ]] && return 1
+    echo "${_fqdn-}"
+}
+function _recker-get-containers-fqdn-and-port-smtp() {
+    local _opt
+    if [[ "${1-}" =~ ^-[p]$ ]]; then
+        _opt="${1#-}"
+        shift
+    fi
+    local _result=$( _recker-get-containers-names )
+    [[ "${_result-}" ]] || return
+    local _fqdn
+    local _ip
+    local i
+    [[ "${_opt-}" = 'p' ]] \
+        && cat /dev/null > "${_CONF[POSTFIX_TRANSPORT]-}"
+    for i in ${_result-}
+    do
+        _ip=$( _recker-get-container-ip $i )
+        _fqdn=$( __confirmAlivePortSMTP $_ip )
+        [[ "${_fqdn-}" ]] || continue
+        case "${_opt-}" in
+            p)
+                echo "${_fqdn-} smtp:${_ip-}" \
+                    >> "${_CONF[POSTFIX_TRANSPORT]-}"
+                ;; 
+            *)
+                echo "${i-}:${_fqdn-}:${_ip-}"
+                ;; 
+        esac
+    done
+    [[ "${_opt-}" = 'p' ]] \
+        && $_POSTMAP "${_CONF[POSTFIX_TRANSPORT]-}"
+}
+
+function __getContainerPortsInfo() {
+    local _target="${1-}"
+    if [[ -z "${_target-}" ]]; then
+        _warn 'specify container name...'
+        return 1
+    fi
+    local _inspect=$( \
+        docker inspect \
+            --format="${_QUERIES[_DOCKER_INSPECT_PORTS]-}" \
+            ${_target-} \
+            | tr -s '[:space:]' ' ' \
+    )
+    echo "${_inspect-}" 
+    return
+}
+function _recker-get-container-ports() {
+    local _target="${1-}"
+    if [[ -z "${_target-}" ]]; then
+        _warn 'specify container name...'
+        return 1
+    fi
+    local _result=$( __getContainerPortsInfo ${_target-} )
+    echo "${_result-}"
+    return
+}
+function _recker-get-container-port-ANYTCP() {
+    local _target="${1-}"
+    if [[ -z "${_target-}" ]]; then
+        _warn 'specify container name...'
+        return 1
+    fi
+    shift
+    local _targetPort="${1-}"
+    if [[ -z "${_targetPort-}" ]]; then
+        _warn 'specify port number...'
+        return 1
+    fi
+    shift
+    local _ports=$( __getContainerPortsInfo ${_target-} )
+    local _result=''
+    if [[ -n "${_ports-}" ]]; then
+        _result=$( \
+            echo "${_ports-}" \
+            | sed -e 's| |\n|g' \
+            | grep "^${_targetPort-}/tcp:" \
+        )
+        [[ -n "${_result-}" ]] && _result=${_result##*:}
+    fi 
+    [[ -z "${_result-}" ]] && return 1
+    echo "${_result-}"
+}
+function _recker-get-container-port-http() {
+    [[ -z "${1-}" ]] && return 1
+    _recker-get-container-port-ANYTCP $1 80
+}
+function _recker-get-container-port-ssh() {
+    [[ -z "${1-}" ]] && return 1
+    _recker-get-container-port-ANYTCP $1 22
+}
+
+function _recker-get-containers-names() {
+    local _result=$( \
+        ${_DOCKER-} ps \
+        | tail -n +2 \
+        | sed -e "${_SEDEXP[GET_DOCKER_CNAME]-}" \
+        | tr '\n' ' ' \
+    )
+    echo "${_result-}"
+    return
+}
+
+function _recker-get-containers-names-and-port-http() {
+    local _opt
+    if [[ "${1-}" =~ ^-[snap]$ ]]; then
+        _opt="${1#-}"
+        shift
+    fi
+    local _result=$( _recker-get-containers-names )
+    [[ "${_result-}" ]] || return
+    local _port
+    local i
+    for i in ${_result-}
+    do
+        _port=$( _recker-get-container-port-http $i )
+        [[ "${_port-}" ]] || continue
+        case "${_opt-}" in
+            s)
+                echo "export CONTAINER_HTTP_${i^^}=${_port-}"
+                ;; 
+            a)
+                echo "SetEnv PORT_FOR_${i^^} ${_port-}"
+                ;;
+            n)
+                echo "set \$url_for_${i,,} http://localhost:${_port-}/;"
+                ;;
+            p)
+                mkdir -p /etc/nginx/recker
+                echo "proxy_pass http://localhost:${_port-};" \
+                    > /etc/nginx/recker/${i,,}
+                ;; 
+            *)
+                echo "$i:${_port-}"
+                ;; 
+        esac
+    done
 }
 
 ###
@@ -1186,6 +1427,9 @@ function _recker() {
         top)
             _list=$( $_RECKER _comp ps )
             ;;
+        get-container-ip|get-container-ports|get-container-port-http|get-container-port-ssh)
+            _list=$( $_RECKER _comp ps )
+            ;;
         select-images)
             _list=$( $_RECKER _comp images )
             ;;
@@ -1217,7 +1461,7 @@ function _recker-_comp() {
     [[ "${_action-}" ]] || _die 'whats?'
     shift
 
-    local _regexGetDockerCidName='s|^\([^[:blank:]]\{1,\}\)[[:blank:]].*[[:blank:]]\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}$|\1 \2|'
+    local _regexGetDockerCidName="${_SEDEXP[GET_DOCKER_CID_NAME]-}"
     local _regexGetDockerImageName='s|^\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\).*$|\1:\2|'
     local _regexGetDockerImageNameId='s|^\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\).*$|\1:\2 \3|'
     local _regexGetDockerImageNameIdAll='s|^[^[:blank:]]\{1,\}[[:blank:]]\{1,\}[^[:blank:]]\{1,\}[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\).*$|\1|'
