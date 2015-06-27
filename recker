@@ -380,6 +380,13 @@ function _recker-cut() {
     cat - | cut -b -$suitableWidth
 }
 
+:<<'_REM_'
+@subcommand
+images
+@@short_description
+@@description
+
+_REM_
 function _recker-images() {
     local opt=''
     if [[ "${1-}" = '-a' ]]; then
@@ -494,7 +501,7 @@ mapfile _T_CONTAINER_SERVICES_SH <<'_EOF_'
 
 # Write here sctript for spawning services in the container
 
-# exapmle:
+# example:
 #service rsyslog start
 #service crond start
 #service postfix start
