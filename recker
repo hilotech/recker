@@ -619,6 +619,7 @@ function _recker-build() {
         source <( \
             grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
             | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|_envs[\1]=\2|;' \
+                -e 's| |__|g' \
         )
         _makeSureDir "${_context-}/_upload" || :
         grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
@@ -861,21 +862,33 @@ function _recker-RUN-FGorBG() {
         "${_imgToExec-}" \
         ${_executable-}
 _EOF_
-    bash -c "${_CONF[COMMAND_PRE_RUN]-}"
 
-    ${_DOCKER-} run \
-        ${_switchFgBg-} \
-        --add-host="dockerhost:$(_getHostIPv4)" \
-        -e DOCKER_HOST_IP="$(_getHostIPv4)" \
-        --name="${_containerName-}" \
-        ${_envs-} \
-        ${_ports-} \
-        ${_links-} \
-        ${_volumes-} \
-        "${_imgToExec-}" \
-        ${_executable-}
+    (
+        cd ${_context-}
+        [[ "${_CONF[COMMAND_PRE_RUN]-}" ]] \
+            && bash -c "${_CONF[COMMAND_PRE_RUN]-}"
+        [[ "${_ICONF[COMMAND_PRE_RUN]-}" ]] \
+            && bash -c "${_ICONF[COMMAND_PRE_RUN]-}"
 
-    bash -c "${_CONF[COMMAND_POST_RUN]-}"
+        ${_DOCKER-} run \
+            ${_switchFgBg-} \
+            --add-host="dockerhost:$(_getHostIPv4)" \
+            -e DOCKER_HOST_IP="$(_getHostIPv4)" \
+            -e CURRENT_DIR="$(pwd)" \
+            --name="${_containerName-}" \
+            ${_envs-} \
+            ${_ports-} \
+            ${_links-} \
+            ${_volumes-} \
+            "${_imgToExec-}" \
+            ${_executable-}
+
+        cd ${_context-}
+        [[ "${_CONF[COMMAND_POST_RUN]-}" ]] \
+            && bash -c "${_CONF[COMMAND_POST_RUN]-}"
+        [[ "${_ICONF[COMMAND_POST_RUN]-}" ]] \
+            && bash -c "${_ICONF[COMMAND_POST_RUN]-}"
+    )
 }
 
 function _recker-run-fg() {
