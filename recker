@@ -1,10 +1,13 @@
 #!/bin/bash
 
-## @name recker
-## @description Docker tiny helper
-## @author HiLoTECH
-## @url http://www.hilotech.jp/
-## @since 2015/04/01
+:<<'@@'
+@NAME recker
+@DESCRIPTION Docker tiny helper
+@AUTHOR HiLoTECH
+@URL http://www.hilotech.jp/
+@SINCE 2015/04/01
+@@
+
 set -e
 set -u
 
@@ -380,13 +383,15 @@ function _recker-cut() {
     cat - | cut -b -$suitableWidth
 }
 
-:<<'_REM_'
-@subcommand
-images
-@@short_description
-@@description
+:<<'@@'
+@SUBCOMMAND images {
+    @description {
+    }
+    @usage
+        
+    }
+@@
 
-_REM_
 function _recker-images() {
     local opt=''
     if [[ "${1-}" = '-a' ]]; then
