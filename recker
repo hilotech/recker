@@ -634,7 +634,7 @@ function _recker-build() {
         )
         _makeSureDir "${_context-}/_upload" || :
         grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
-            | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1=\2|;' \
+            | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1="\2"|;' \
             > "${_context-}/_upload/envs_onbuild.sh"
         echo "DOCKER_HOST_IP=\"$(_getHostIPv4)\"" \
             >> "${_context-}/_upload/envs_onbuild.sh"
@@ -723,9 +723,14 @@ function _recker-RUN-FGorBG() {
                 | grep -v '^SET[[:blank:]]' \
                 | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
             )
-            local _envs=$( \
+            local _envs=$( 
                 grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
-                | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|-e \1=\2|;' \
+                | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1=\2|;' \
+                    -e 's| |__|g'
+            )
+            _envs=$(
+                echo "${_envs-}" \
+                | sed -e 's|^|-e |' \
                 | tr '\n' ' ' \
             )
         fi
@@ -839,13 +844,13 @@ function _recker-RUN-FGorBG() {
         _result=$( __findUnusedPortFrom ${_CONF[AUTOMAP_PORT_HTTP_FROM]-} )
         _mention "HTTP port auto-mapped to: ${_result-}"
         _ports="${_ports-} -p ${_result-}:80 "
-        _envs="${_envs-} -e AUTOMAP_PORT_HTTP=${_result-}"
+        _envs="${_envs-} -e AUTOMAP_PORT_HTTP=\"${_result-}\""
     fi
     if [[ "${_ICONF[AUTOMAP_PORT_SSH]-}" ]]; then
         _result=$( __findUnusedPortFrom ${_CONF[AUTOMAP_PORT_SSH_FROM]-} )
         _mention " SSH port auto-mapped to: ${_result-}"
         _ports="${_ports-} -p ${_result-}:22 "
-        _envs="${_envs-} -e AUTOMAP_PORT_SSH=${_result-}"
+        _envs="${_envs-} -e AUTOMAP_PORT_SSH=\"${_result-}\""
     fi
     if [[ "${_ICONF[RUN_AS_SERVICE]-}" -eq 1 ]]; then
         [[ "${_switchFgBg-}" != "${_CONF[DOCKER_RUN_SWITCH_BG]-}" ]] \
