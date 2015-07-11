@@ -149,6 +149,7 @@ declare -r -a _SUB_COMMANDS=(
     'get-container-port-ssh'
     'get-containers-names' 'get-containers-names-and-port-http'
     'usage' 'help' 'man' 'version' 'cut'
+    'exec-all'
     'bashcompletion'
     'install-percol'
     '_comp'
@@ -719,12 +720,12 @@ function _recker-RUN-FGorBG() {
         _isUnderRecker=1
         _imgConfigFile="${_context-}/config.sh"
         if [[ -r "${_imgConfigFile-}" ]]; then
-            source <( \
+            source <(
                 grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
                 | grep -v '^SET[[:blank:]]' \
                 | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
             )
-            local _envs=$( 
+            local _envs=$(
                 grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
                 | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1=\2|;' \
                     -e 's| |__|g'
@@ -914,6 +915,22 @@ function _recker-run-bg() {
 function _recker-run() {
     _recker-run-fg "$@"
 }
+
+#function _recker-exec-all() {
+#    local -A _ICONF
+#    if [[ -d "${_imgName-}" ]]; then
+#        _imgName="${_imgName##*/}"
+#        _imgToExec="${_maintainerName-}/${_imgName-}"
+#        _isUnderRecker=1
+#        _imgConfigFile="${_context-}/config.sh"
+#        if [[ -r "${_imgConfigFile-}" ]]; then
+#            source <( \
+#                grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
+#                | grep -v '^SET[[:blank:]]' \
+#                | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
+#        fi
+#    fi
+#}
 
 function _recker-rmi() {
     local cids=''
