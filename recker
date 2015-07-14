@@ -732,6 +732,7 @@ function _recker-RUN-FGorBG() {
             )
             _envs=$(
                 echo "${_envs-}" \
+                | grep -v '^$' \
                 | sed -e 's|^|-e |' \
                 | tr '\n' ' ' \
             )
@@ -783,6 +784,12 @@ function _recker-RUN-FGorBG() {
             && -n "${_ICONF[EXEC]-}" \
         ]]; then
             _executable="${_ICONF[EXEC]-}"
+        fi
+        if [[ \
+            ${_isUnderRecker-} -eq 1 \
+            && "${_ICONF[EXEC]-}" = 'default' \
+        ]]; then
+            _executable=''
         fi
     fi
 
