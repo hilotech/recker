@@ -26,7 +26,7 @@ Recker は [Docker](https://www.docker.com/) のコマンドラインヘルパ�
 
 ### SLを走らせる
 
-````console
+```console
 $ recker scaffold my_sl_container
 $ cd ~/Docker/Dockerfiles/my_sl_container
 $ cat <<'_EOF_' >> container_build.sh
@@ -53,11 +53,11 @@ __/ =| o |=-~~\  /~~\  /~~\  /~~\ ____Y___________|__|___
 |/-=|___|=   O=====O=====O=====O|_____/~\___/          |
  \_/      \__/  \__/  \__/  \__/      \_/
 $ 
-````
+```
 
 ### Apache族をたくさん呼ぶホホホ
 
-````console
+```console
 $ recker scaffold call_apache
 $ cd ~/Docker/Dockerfiles/call_apache
 $ cat <<'_EOF_' >> container_build.sh
@@ -84,18 +84,18 @@ HTTP port auto-mapped to: 8002
 Changed mode to background because of declaration RUN_AS_SERVICE
 cd0a73733580ad604263d1fa4c140d41367fde3a7314fb567495826089342ce0
     :
-````
+```
 
 ### コンテナ名をTAB補完 or カーソルで選択する
 
-````console
+```console
 $ recker ps [TAB]
 0d7a3a762cff   9763f9c4bed2   call_apache    call_apache-2  lamp
 8214acd40c4c   c5eb911def0f   call_apache-1  cd0a73733580   mean
 
 $ recker ps [Enter]
     ↓画面
-````
+```
 
 ![カーソル選択画面](https://raw.githubusercontent.com/wiki/hilotech/recker/img/recker-selection.png)
 
@@ -114,34 +114,34 @@ $ recker ps [Enter]
 
 root 権限でインストールする場合は、
 
-````console
+```console
 # wget -O /usr/local/bin/recker \
   https://raw.githubusercontent.com/hilotech/recker/master/recker
 # chmod +x /usr/local/bin/recker
-````
+```
 
 で完了です。スクリプトを好きなところに置くだけで通常ユーザー権限でも利用できます。ただし、実際に使用する場合は該当ユーザーが `docker` グループに所属していたほうがいいでしょう。
 
 TAB補完機能は、
 
-````console
+```console
 # echo '[[ "${PS1-}" ]] && source <(recker bashcompletion)' \
     >> /etc/bashrc
-````
+```
 
 とするか、または一時的に利用するだけなら、
 
-````console
+```console
 $ source <(recker bashcompletion)
-````
+```
 
 でOKです。
 
 メニュー形式の選択画面を利用する場合は、Python製のツール [Percol](https://github.com/mooz/percol) が必要です。以下の手順に準じて `easy_install`, `pip` を導入後に `percol` をインストールしてください。
 
-````console
+```console
 # yum -y install python-setuptools
 # easy_install pip
 # pip install percol
-````
+```
 
