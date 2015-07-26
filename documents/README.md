@@ -267,7 +267,7 @@ Docker イメージビルド／コンテナコンテキスト作成のための�
 
 使用例：
 ```console
-$ recker wordpress
+$ recker scaffold wordpress
 ```
 
 ### `build` [context directory]
