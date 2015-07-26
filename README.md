@@ -33,6 +33,7 @@ $ cat <<'_EOF_' >> container_build.sh
 yum -y install epel-release
 yum -y install sl
 _EOF_
+$ sed -i -e 's|^\(EXEC\)=$|\1=/usr/bin/sl|' config.sh
 $ recker build ./
 $ recker run ./
                       (@@) (  ) (@)  ( )  @@    ()    @
