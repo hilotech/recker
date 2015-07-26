@@ -149,6 +149,7 @@ declare -r -a _SUB_COMMANDS=(
     'get-container-port-ssh'
     'get-containers-names' 'get-containers-names-and-port-http'
     'usage' 'help' 'man' 'version' 'cut'
+    'exec-all'
     'bashcompletion'
     'install-percol'
     '_comp'
@@ -631,6 +632,7 @@ function _recker-build() {
         source <( \
             grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
             | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|_envs[\1]=\2|;' \
+                -e 's| |__|g' \
         )
         _makeSureDir "${_context-}/_upload" || :
         grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
@@ -718,18 +720,19 @@ function _recker-RUN-FGorBG() {
         _isUnderRecker=1
         _imgConfigFile="${_context-}/config.sh"
         if [[ -r "${_imgConfigFile-}" ]]; then
-            source <( \
+            source <(
                 grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
                 | grep -v '^SET[[:blank:]]' \
                 | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
             )
-            local _envs=$( 
+            local _envs=$(
                 grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
                 | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1=\2|;' \
                     -e 's| |__|g'
             )
             _envs=$(
                 echo "${_envs-}" \
+                | grep -v '^$' \
                 | sed -e 's|^|-e |' \
                 | tr '\n' ' ' \
             )
@@ -781,6 +784,12 @@ function _recker-RUN-FGorBG() {
             && -n "${_ICONF[EXEC]-}" \
         ]]; then
             _executable="${_ICONF[EXEC]-}"
+        fi
+        if [[ \
+            ${_isUnderRecker-} -eq 1 \
+            && "${_ICONF[EXEC]-}" = 'default' \
+        ]]; then
+            _executable=''
         fi
     fi
 
@@ -873,21 +882,33 @@ function _recker-RUN-FGorBG() {
         "${_imgToExec-}" \
         ${_executable-}
 _EOF_
-    bash -c "${_CONF[COMMAND_PRE_RUN]-}"
 
-    ${_DOCKER-} run \
-        ${_switchFgBg-} \
-        --add-host="dockerhost:$(_getHostIPv4)" \
-        -e DOCKER_HOST_IP="$(_getHostIPv4)" \
-        --name="${_containerName-}" \
-        ${_envs-} \
-        ${_ports-} \
-        ${_links-} \
-        ${_volumes-} \
-        "${_imgToExec-}" \
-        ${_executable-}
+    (
+        cd ${_context-}
+        [[ "${_CONF[COMMAND_PRE_RUN]-}" ]] \
+            && bash -c "${_CONF[COMMAND_PRE_RUN]-}"
+        [[ "${_ICONF[COMMAND_PRE_RUN]-}" ]] \
+            && bash -c "${_ICONF[COMMAND_PRE_RUN]-}"
 
-    bash -c "${_CONF[COMMAND_POST_RUN]-}"
+        ${_DOCKER-} run \
+            ${_switchFgBg-} \
+            --add-host="dockerhost:$(_getHostIPv4)" \
+            -e DOCKER_HOST_IP="$(_getHostIPv4)" \
+            -e CURRENT_DIR="$(pwd)" \
+            --name="${_containerName-}" \
+            ${_envs-} \
+            ${_ports-} \
+            ${_links-} \
+            ${_volumes-} \
+            "${_imgToExec-}" \
+            ${_executable-}
+
+        cd ${_context-}
+        [[ "${_CONF[COMMAND_POST_RUN]-}" ]] \
+            && bash -c "${_CONF[COMMAND_POST_RUN]-}"
+        [[ "${_ICONF[COMMAND_POST_RUN]-}" ]] \
+            && bash -c "${_ICONF[COMMAND_POST_RUN]-}"
+    )
 }
 
 function _recker-run-fg() {
@@ -901,6 +922,22 @@ function _recker-run-bg() {
 function _recker-run() {
     _recker-run-fg "$@"
 }
+
+#function _recker-exec-all() {
+#    local -A _ICONF
+#    if [[ -d "${_imgName-}" ]]; then
+#        _imgName="${_imgName##*/}"
+#        _imgToExec="${_maintainerName-}/${_imgName-}"
+#        _isUnderRecker=1
+#        _imgConfigFile="${_context-}/config.sh"
+#        if [[ -r "${_imgConfigFile-}" ]]; then
+#            source <( \
+#                grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
+#                | grep -v '^SET[[:blank:]]' \
+#                | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
+#        fi
+#    fi
+#}
 
 function _recker-rmi() {
     local cids=''
