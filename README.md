@@ -22,6 +22,10 @@ Recker は [Docker](https://www.docker.com/) のコマンドラインヘルパ�
 
 * [Reckerfiles](https://github.com/hilotech/Reckerfiles)
 
+もう少し詳細なリファレンスは以下にあります：
+
+* [リファレンス](https://github.com/hilotech/recker/tree/master/documents)
+
 ## 利用例
 
 ### SLを走らせる
