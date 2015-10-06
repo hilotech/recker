@@ -623,6 +623,7 @@ function _recker-build() {
     local -A _ICONF
     local -A _envs
     local _imgConfigFile="${_context-}/config.sh"
+    _makeSureDir "${_context-}/_upload" || :
     if [[ -r "${_imgConfigFile-}" ]]; then
         source <( \
             grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
@@ -634,7 +635,6 @@ function _recker-build() {
             | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|_envs[\1]=\2|;' \
                 -e 's| |__|g' \
         )
-        _makeSureDir "${_context-}/_upload" || :
         grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
             | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1="\2"|;' \
             > "${_context-}/_upload/envs_onbuild.sh"
