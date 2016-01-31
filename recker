@@ -5,7 +5,7 @@
 @DESCRIPTION Docker tiny helper
 @AUTHOR HiLoTECH
 @URL http://www.hilotech.jp/
-@SINCE 2015/04/01
+@SINCE 2016/02/01
 @@
 
 set -e
@@ -98,6 +98,7 @@ SUBCOMMANDS
 SUPPORTED OS
   * Linux
     I tested only CentOS 6, 7...
+    and on Raspbian a little.
 
 _EOF_
 
@@ -128,8 +129,8 @@ declare -A _CONF=(
     [EXEC_IP]='ip'
     [EXEC_POSTMAP]='postmap'
     [COMMAND_PRE_RUN]=''
-    [COMMAND_POST_RUN]='sleep 10 && recker get-containers-fqdn-and-port-smtp -p'
-    [POSTFIX_TRANSPORT]='/etc/postfix/transport-recker'
+#    [COMMAND_POST_RUN]='sleep 10 && recker get-containers-fqdn-and-port-smtp -p'
+#    [POSTFIX_TRANSPORT]='/etc/postfix/transport-recker'
 )
 
 declare -r -a _SUB_COMMANDS=(
@@ -446,12 +447,12 @@ ADD _upload /tmp/_upload
 ADD container_build.sh /tmp/container_build.sh
 ADD container_services.sh /etc/container_services.sh
 RUN \
-    echo -e "#!/bin/bash\n\
+    /bin/echo -e '#!/bin/bash\n\
 [[ -f /etc/container_services.sh ]] \
     && chmod +x /etc/container_services.sh \
     && /etc/container_services.sh \n\
 while true; do sleep 10; done\n\
-" > /etc/container_init.sh
+' > /etc/container_init.sh
 RUN \
     chmod +x /etc/container_init.sh /tmp/container_build.sh \
     && /tmp/container_build.sh \
@@ -463,11 +464,18 @@ _EOF_
 mapfile _T_CONTAINER_BUILD_SH <<'_EOF_'
 #!/bin/bash
 
-# some basic settings for CentOS
-echo 'ZONE="Asia/Tokyo"' > /etc/sysconfig/clock
-/bin/rm /etc/localtime
-ln -fs /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
-echo '[[ "${PS1-}" ]] && PS1=":D $PS1"' >> /etc/bashrc
+if grep -q 'CentOS' /etc/issue; then
+    # some basic settings for CentOS
+    echo 'ZONE="Asia/Tokyo"' > /etc/sysconfig/clock
+    /bin/rm /etc/localtime
+    ln -fs /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
+    echo '[[ "${PS1-}" ]] && PS1=":D $PS1"' >> /etc/bashrc
+fi
+
+if grep -q 'GNU/Linux' /etc/issue; then
+    # some basic settings for Debians
+    echo '[[ "${PS1-}" ]] && PS1=":D $PS1"' >> /etc/bash.bashrc
+fi
 
 # Write here how to build container
 
@@ -622,6 +630,7 @@ function _recker-build() {
 
     local -A _ICONF
     local -A _envs
+    _envs['_Z']='Z'
     local _imgConfigFile="${_context-}/config.sh"
     _makeSureDir "${_context-}/_upload" || :
     if [[ -r "${_imgConfigFile-}" ]]; then
