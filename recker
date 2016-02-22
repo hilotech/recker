@@ -5,7 +5,7 @@
 @DESCRIPTION Docker tiny helper
 @AUTHOR HiLoTECH
 @URL http://www.hilotech.jp/
-@SINCE 2016/02/01
+@DATE 2016/02/22
 @@
 
 set -e
@@ -16,7 +16,7 @@ VERBOSE="${VERBOSE-}"
 [[ -n "${VERBOSE-}" ]] \
     && set -v
 
-readonly _VERSION='0.6.1'
+readonly _VERSION='0.8.20160222'
 readonly _RECKER_ABS=$( readlink -f $0 )
 readonly _RECKER="${_RECKER_ABS##*/}"
 
@@ -38,7 +38,7 @@ DESCRIPTION
 
 PREREQUISITES
   * Docker
-    Version>=1.6.0
+    Version>=1.9.0
   * Percol
     Python-based CUI selection helper. https://github.com/mooz/percol
   * Bash
@@ -77,6 +77,8 @@ SUBCOMMANDS
     Make a context directory's scaffold for building Docker image.
   build
     Select a context directory made by 'scaffold' and build the image.
+  clean
+    Clean up context directory. Removes containers, volumes, etc.
   select-containers | select-containers-a
     Select containers and display its' names.
   select-images | select-images-a
@@ -115,7 +117,7 @@ declare -A _CONF=(
     [DIR_DOCKER_VOLUMES]='volumes'
     [DOCKER_BUILD_OPT]='--force-rm --rm=true --no-cache=true '
     [DOCKER_BUILD_BASE_IMG]='centos:centos6'
-#   [DOCKER_MAINTAINER_NAME]='hilotech'
+    [DOCKER_MAINTAINER_NAME]='recker'
     [DOCKER_ENTRY_EXECUTABLE]='/bin/bash'
     [DOCKER_ENTERING_COMMAND]='/bin/bash'
     [DOCKER_SERVICE_ENTRYPOINT]='/etc/container_init.sh'
@@ -129,12 +131,12 @@ declare -A _CONF=(
     [EXEC_IP]='ip'
     [EXEC_POSTMAP]='postmap'
     [COMMAND_PRE_RUN]=''
-#    [COMMAND_POST_RUN]='sleep 10 && recker get-containers-fqdn-and-port-smtp -p'
+    [COMMAND_POST_RUN]=''
 #    [POSTFIX_TRANSPORT]='/etc/postfix/transport-recker'
 )
 
 declare -r -a _SUB_COMMANDS=(
-    'build' 'run' 'run-fg' 'run-bg' 
+    'build' 'run' 'run-fg' 'run-bg' 'clean'
     'scaffold' 'enter'
     'images' 'images-a' 'ps' 'ps-a' 'top'
     'rmi' 'rmi-a'
@@ -154,6 +156,7 @@ declare -r -a _SUB_COMMANDS=(
     'bashcompletion'
     'install-percol'
     '_comp'
+    '_print_container_lib_sh'
 )
 
 declare -r -A _QUERIES=(
@@ -164,6 +167,11 @@ declare -r -A _QUERIES=(
 declare -r -A _SEDEXP=(
     [GET_DOCKER_CNAME]='s|^[^[:blank:]]\{1,\}[[:blank:]].*[[:blank:]]\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}$|\1|'
     [GET_DOCKER_CID_NAME]='s|^\([^[:blank:]]\{1,\}\)[[:blank:]].*[[:blank:]]\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}$|\1 \2|'
+)
+
+declare -r -A _CONST=(
+    [CLEANUP_UNITS_ALL]='CONTAINER IMAGE VOLUME USER DB_USER DATABASE FILE DIR'
+    [CLEANUP_UNITS_PREBUILD]='CONTAINER IMAGE VOLUME USER DB_USER DATABASE FILE'
 )
 
 function _caution() {
@@ -209,6 +217,15 @@ function _noExecThenDie() {
     _noExecP "$1" && \
         _die "[Error] $1 not found in your PATH"
     return 0
+}
+
+function _has() {
+    local _list="${1-}"
+    local _elem="${2-}"
+    [[ -z "${_list-}" || -z "${_elem-}" ]] \
+        && return 1
+    echo "${_list-}" | tr ' ' '\n' | grep -q '^'${_elem-}'$' \
+        || return 1
 }
 
 # Usage: local -A __opts=`_getOptsArray --hoge=fuga --age=uge`
@@ -270,6 +287,20 @@ function _setExecs() {
     _PERCOL=${_CONF[EXEC_PERCOL]}
     _DOCKER=${_CONF[EXEC_DOCKER]}
     _POSTMAP=${_CONF[EXEC_POSTMAP]}
+}
+
+function _isPriorDockerVersion() {
+    local _dockerVersion=$( \
+        $_DOCKER --version | cut -d ' ' -f 3 \
+    )
+    _dockerVersion=${_dockerVersion/,/}
+    local _semantics=( ${_dockerVersion//./ } )
+    [[ "${1-}" -ge 0 ]] && [[ "${1-}" -ge "${_semantics[0]-}" ]] || \
+        return 1
+    [[ "${2-}" -ge 0 ]] && [[ "${2-}" -ge "${_semantics[1]-}" ]] || \
+        return 1
+    [[ "${3-}" -ge 0 ]] && [[ "${3-}" -ge "${_semantics[2]-}" ]] || \
+        return 1
 }
 
 function _getOSName() {
@@ -385,15 +416,6 @@ function _recker-cut() {
     cat - | cut -b -$suitableWidth
 }
 
-:<<'@@'
-@SUBCOMMAND images {
-    @description {
-    }
-    @usage
-        
-    }
-@@
-
 function _recker-images() {
     local opt=''
     if [[ "${1-}" = '-a' ]]; then
@@ -443,20 +465,81 @@ function _recker-man(){
 ### template: Dockerfile
 mapfile _T_DOCKERFILE <<'_EOF_'
 FROM %%BASE_IMAGE%%
+ARG RUN_AS_SERVICE
+ARG VOLUMES
+ARG PORTS
+ARG LINKS
+ARG EXEC
+ARG SWAPPY
+ARG OOMK_CANCEL
+
+# Upload setup scripts
 ADD _upload /tmp/_upload
-ADD container_build.sh /tmp/container_build.sh
-ADD container_services.sh /etc/container_services.sh
+ADD container_build.sh /var/recker/usr/container_build.sh
+ADD container_services.sh /var/recker/usr/container_services.sh
+RUN \
+    mkdir -p \
+        /var/recker/lib \
+        /var/recker/usr \
+        /var/recker/tar \
+        /var/recker/log \
+        && \
+    chmod +x /var/recker/usr/container_build.sh && \
+    ln -s /var/recker/usr/container_build.sh /tmp/container_build.sh && \
+    chmod +x /var/recker/usr/container_services.sh && \
+    ln -s /var/recker/usr/container_services.sh /etc/container_services.sh && \
+    mv /tmp/_upload/container_lib.sh /var/recker/lib/container_lib.sh && \
+    chmod +x /var/recker/lib/container_lib.sh && \
+    mv /tmp/_upload/envs_onbuild.sh /var/recker/lib/envs_onbuild.sh
+
+# Preparation checker
 RUN \
     /bin/echo -e '#!/bin/bash\n\
-[[ -f /etc/container_services.sh ]] \
-    && chmod +x /etc/container_services.sh \
-    && /etc/container_services.sh \n\
+[[ -f /var/recker/log/container_runonce.sh.done ]] \
+    || exit 1\n\
+' > /usr/local/bin/is_preparation_done \
+    && chmod +x /usr/local/bin/is_preparation_done
+
+# Set entry point shell script
+RUN \
+    /bin/echo -e '#!/bin/bash\n\
+set -eu\n\
+: > /var/recker/log/container.log\n\
+exec >>/var/recker/log/container.log\n\
+exec 2>&1\n\
+[[ -f /var/recker/lib/container_lib.sh ]] \\\n\
+    && source /var/recker/lib/container_lib.sh \n\
+[[ -f /var/recker/lib/envs_onbuild.sh ]] \\\n\
+    && source /var/recker/lib/envs_onbuild.sh \n\
+[[ \\\n\
+    -z "${VOLUMES-}" \\\n\
+    || "${DONT_PRESERVE_SHARED_VOLUME-}" -eq 1 \\\n\
+]] \\\n\
+    || _cUntarSharedVolumes\n\
+[[ \\\n\
+    ! -f /var/recker/log/container_runonce.sh.done \\\n\
+    && -f /var/recker/usr/container_runonce.sh \\\n\
+]] \\\n\
+    && source /var/recker/usr/container_runonce.sh \\\n\
+    && touch /var/recker/log/container_runonce.sh.done \n\
+[[ -f /var/recker/usr/container_services.sh ]] \\\n\
+    && source /var/recker/usr/container_services.sh \n\
 while true; do sleep 10; done\n\
 ' > /etc/container_init.sh
+
+# Build and cleaning up
 RUN \
     chmod +x /etc/container_init.sh /tmp/container_build.sh \
-    && /tmp/container_build.sh \
-    && /bin/rm /tmp/container_build.sh \
+    && touch /var/recker/log/build.log \
+    && bash -c '( \
+        source /var/recker/lib/envs_onbuild.sh && \
+        source /var/recker/lib/container_lib.sh && \
+        source /tmp/container_build.sh && \
+        _cPreserveSharedVolumes \
+    ) ' 2>&1 \
+        | tee -a /var/recker/log/build.log
+RUN \
+    /bin/rm /tmp/container_build.sh \
     && /bin/rm -r /tmp/_upload
 _EOF_
 
@@ -464,20 +547,34 @@ _EOF_
 mapfile _T_CONTAINER_BUILD_SH <<'_EOF_'
 #!/bin/bash
 
-if grep -q 'CentOS' /etc/issue; then
-    # some basic settings for CentOS
-    echo 'ZONE="Asia/Tokyo"' > /etc/sysconfig/clock
-    /bin/rm /etc/localtime
-    ln -fs /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
-    echo '[[ "${PS1-}" ]] && PS1=":D $PS1"' >> /etc/bashrc
-fi
-
-if grep -q 'GNU/Linux' /etc/issue; then
-    # some basic settings for Debians
-    echo '[[ "${PS1-}" ]] && PS1=":D $PS1"' >> /etc/bash.bashrc
-fi
+: <<END_OF_DESCRIPTION
+:NAME
+    
+:DESCRIPTION
+    
+:AUTHOR
+    
+:DATE
+    
+:VERSION
+    
+END_OF_DESCRIPTION
 
 # Write here how to build container
+
+# _cSetScriptFor1stRuntime sets STDIN to container's first
+# runtime script.
+# example)
+#_cSetScriptFor1stRuntime <<'______SCRIPT_FOR_1ST_RUNTIME'
+#    :
+#______SCRIPT_FOR_1ST_RUNTIME
+
+# _cSetScriptContainerServices sets STDIN as a script for
+# bootstrap container's services.
+# example)
+#_cSetScriptContainerServices <<'______SCRIPT_FOR_SERVICES'
+#    :
+#______SCRIPT_FOR_SERVICES
 
 _EOF_
 
@@ -491,6 +588,10 @@ VOLUMES=
 PORTS=
 LINKS=
 BASE_IMAGE=
+COMMAND_POST_RUN=
+PERMIT_CLEANUP="CONTAINER IMAGE VOLUME USER DB_USER DATABASE FILE DIR"
+BACKUP_BEFORE_CLEANUP="VOLUME DATABASE"
+#SET VARIABLENAME=VARIABLEVALUE
 _EOF_
 
 ### template: pre_build.sh
@@ -513,12 +614,9 @@ _EOF_
 mapfile _T_CONTAINER_SERVICES_SH <<'_EOF_'
 #!/bin/bash
 
-# Write here sctript for spawning services in the container
-
-# example:
-#service rsyslog start
-#service crond start
-#service postfix start
+# `container_services.sh` is now obsolete.
+# Please use `_cSetScriptContainerServices` in `container_build.sh`
+# But this file will be treated properly for the sake of compatibility.
 _EOF_
 
 function _recker-scaffold(){
@@ -573,7 +671,6 @@ function _recker-scaffold(){
     for i in \
         Dockerfile container_build.sh config.sh \
         pre_build.sh post_build.sh \
-        container_services.sh \
         ;
     do
         _fn=$i
@@ -594,6 +691,831 @@ function _recker-scaffold(){
 
 ###
 ### subcommands depends on percol
+###
+
+###
+### Built-in files for building images
+###
+
+### File-content: container_lib.sh
+### for _print_container_lib_sh
+mapfile _B_CONTAINER_LIB_SH <<'_EOF_BUILT_IN_FILE'
+#!/bin/bash
+
+# Check distribution
+DIST='unknown'
+ISSUES=$( cat /etc/issue ) || DIST='unknown'
+[[ ${ISSUES-} =~ 'CentOS' ]]      && DIST='centos'
+[[ ${ISSUES-} =~ 'GNU/Linux' ]]   && DIST='debian'
+function _cIsDist () {
+    [[ ${DIST-} =~ "${1-}" ]] && return
+    return 1
+}
+
+# File path
+_C_BASHRC=''
+case "${DIST-}" in
+    centos )
+        _C_BASHRC='/etc/bashrc'
+        ;;
+    debian )
+        _C_BASHRC='/etc/bash.bashrc'
+        ;;
+esac
+
+# Services
+function _cRunServices() {
+    for i in "$@"
+    do
+        [[ -x systemctl ]] && \
+            systemctl start $i || \
+            service $i start
+    done
+}
+
+# Strip strange Docker args/envs
+function _cStripEnv() {
+    [[ "${1-}" ]] || return
+    local _e="${1#\"}"
+    _e="${_e%\"}"
+    echo ${_e//__/ }
+}
+
+# Tar shared volumes 
+function _cTarSharedVolumes() {
+    [[ "$@" ]] || return 1
+    mkdir -p /var/recker/tar
+    tar \
+        cvzf \
+        /var/recker/tar/shared_dirs.tgz \
+        --directory / \
+        --preserve-permissions \
+        --acls \
+        --xattrs \
+        $@
+}
+
+# Untar shared volumes
+function _cUntarSharedVolumes() {
+    [[ -r /var/recker/tar/shared_dirs.tgz ]] || return 1
+    tar \
+        xvzf \
+        /var/recker/tar/shared_dirs.tgz \
+        --directory / \
+        --preserve-permissions \
+        --overwrite \
+        --overwrite-dir \
+        --acls \
+        --xattrs
+}
+
+# 
+function _cPreserveSharedVolumes () {
+    [[ -z "${VOLUMES-}" || "${DONT_PRESERVE_SHARED_VOLUME-}" -eq 1 ]] \
+        && return
+    _cTarSharedVolumes ${VOLUMES-}
+}
+
+#
+function _cSetScriptFor1stRuntime () {
+    cat <<'_EOF_' > /var/recker/usr/container_runonce.sh
+#!/bin/bash
+_EOF_
+    cat - >> /var/recker/usr/container_runonce.sh
+    chmod +x /var/recker/usr/container_runonce.sh
+}
+
+#
+function _cSetScriptContainerServices () {
+    cat <<'_EOF_' > /var/recker/usr/container_services.sh
+#!/bin/bash
+_EOF_
+    cat - >> /var/recker/usr/container_services.sh
+    chmod +x /var/recker/usr/container_services.sh
+}
+
+
+_EOF_BUILT_IN_FILE
+
+
+###
+### Functions for building images
+###
+
+### pre/post-build functions for end-users
+function _pWarn() {
+    echo -e "\e[31m[PREBUILD] $@\e[m" >&2
+}
+
+function _pGetHostUserUId () {
+    local _USER="${1-}"
+    if [[ "${_USER-}" ]] && grep -q "^${_USER-}" /etc/passwd ; then
+        :
+    else
+        _pWarn "User unspecified or unknown user : ${_USER-}"
+        exit 1
+    fi
+    grep "^${_USER-}" /etc/passwd \
+        | cut -d : -f 3
+}
+
+function _pGetHostUserGId () {
+    local _USER="${1-}"
+    if [[ "${_USER-}" ]] && grep -q "^${_USER-}" /etc/passwd ; then
+        :
+    else
+        _pWarn "User unspecified or unknown user : ${_USER-}"
+        exit 1
+    fi
+    grep "^${_USER-}" /etc/passwd \
+        | cut -d : -f 4 
+}
+
+function _pAddToBeCleaned () {
+    echo "$@" >> ${_context-}/.tobecleaned
+}
+
+function _pAddUserToHost () {
+    local _USER="${1-}"
+    shift
+    if [[ "${_USER-}" ]] && ! grep -q "^${_USER-}" /etc/passwd ; then
+        :
+    else
+        _pWarn "User unspecified or user already exists: ${_USER-}"
+        exit 1
+    fi
+    useradd \
+        --create-home \
+        --user-group \
+        $@ \
+        ${_USER-}
+    _pAddToBeCleaned "USER: ${_USER-}"
+}
+
+function _pPassEnv () {
+    local KEY_VALUE="$@"
+    if [[ "${KEY_VALUE-}" =~ ^[^=][^=]*=[^=][^=]*$ ]]; then
+        :
+    else
+        return 1
+    fi
+    echo "_P_${KEY_VALUE-}" >> _upload/envs_onbuild.sh
+}
+
+function _pExecSQL () {
+    local _connection=${1-}
+    shift
+    local _host=${_connection##*@}
+    local _user=${_connection%@*}
+    local _passwd=${_user#*:}
+    _user=${_user%%:*}
+    if [[ "${_host-}" && "${_user-}" && "${_passwd-}" ]]; then
+        :
+    else
+        _pWarn "Insufficient arguments: ${_connection-}"
+        exit 1
+    fi
+    local _additional_args="$@"
+    [[ -n "${_additional_args-}" ]] \
+        && _additional_args='--silent'
+    /usr/bin/mysql \
+        ${_additional_args-} \
+        --host=${_host-} \
+        --user=${_user-} \
+        --password=${_passwd-}
+    return $?
+}
+
+function _pIsDatabaseExists () {
+    local _database=${1-}
+    local _connection=${2-}
+
+    if [[ "${_database-}" && "${_connection-}" ]]; then
+        :
+    else
+        _pWarn "Insufficient arguments: ${_database-} ${_connection-}" 
+        exit 1
+    fi
+
+    if [[ -n $( \
+        echo "SHOW DATABASES LIKE '${_database-}';" \
+            | _pExecSQL "${_connection-}" \
+    ) ]]; then
+        :
+    else
+        return 1
+    fi
+}
+
+function _pIsDBUserExists () {
+    local _user=${1-}
+    local _connection=${2-}
+
+    if [[ "${_user-}" && "${_connection-}" ]]; then
+        :
+    else
+        _pWarn "Insufficient arguments: ${_user-} ${_connection-}" 
+        exit 1
+    fi
+
+    if [[ -n $( \
+        echo "SELECT User FROM mysql.user WHERE user='${_user-}';" \
+            | _pExecSQL "${_connection-}" \
+    ) ]]; then
+        :
+    else
+        return 1
+    fi
+}
+
+function _pDropDBandUserIfExists () {
+    local _database=${1-}
+    local _user=${2-}
+    local _connection=${3-}
+
+    if [[ "${_database-}" && "${_user-}" && "${_connection-}" ]]; then
+        :
+    else
+        _pWarn "Insufficient arguments: "${_database-}" ${_user-} ${_connection-}" 
+        exit 1
+    fi
+
+    _pDropDBUserIfExists "${_user-}" "${_connection-}"
+    _pDropDatabaseIfExists "${_database-}" "${_connection-}"
+}
+
+function _pDropDBUserIfExists () {
+    local _user=${1-}       # NOTE: you must specify %hostname postfix
+    local _connection=${2-}
+
+    if [[ "${_user-}" && "${_connection-}" ]]; then
+        :
+    else
+        _pWarn "Insufficient arguments: ${_user-} ${_connection-}" 
+        exit 1
+    fi
+
+    if ! _pIsDBUserExists ${_user-} "${_connection-}"; then 
+        return
+    fi
+
+    _pExecSQL "${_connection-}" <<_EOF_
+DROP USER ${_user-}
+FLUSH PRIVILEGES;
+_EOF_
+}
+
+function _pDropDatabaseIfExists () {
+    local _database=${1-}
+    local _connection=${2-}
+
+    if [[ "${_database-}" && "${_connection-}" ]]; then
+        :
+    else
+        _pWarn "Insufficient arguments: ${_database-} ${_connection-}" 
+        exit 1
+    fi
+
+    echo "DROP DATABASE IF EXISTS ${_database-};" \
+        | _pExecSQL "${_connection-}"
+}
+
+function _pCreateDatabaseAndUserIfNotExists () {
+    local _database=${1-}
+    local _connection=${2-}
+    local _newUserPasswd=${3-}
+
+    if [[ \
+        "${_database-}" \
+        && "${_connection-}" \
+        && "${_newUserPasswd-}" \
+    ]]; then
+        :
+    else
+        _pWarn "Insufficient arguments: ${_database-} ${_connection-} ${_newUserPasswd-}" 
+        exit 1
+    fi
+
+    if _pIsDatabaseExists ${_database-} "${_connection-}"; then 
+        return
+    fi
+
+    local _user=${_newUserPasswd%:*}
+    local _passwd=${_newUserPasswd#*:}
+    if [[ "${_user-}" && "${_passwd-}" ]]; then
+        :
+    else
+        _pWarn "Insufficient arguments: ${_newUserPasswd-}" 
+        exit 1
+    fi
+
+    _pExecSQL "${_connection-}" \
+<<_EOF_
+CREATE
+    DATABASE ${_database-}
+    DEFAULT CHARACTER SET utf8
+;
+_EOF_
+    _pAddToBeCleaned "DATABASE: ${_database-} ${_connection-}"
+
+    for _host in localhost 127.0.0.1 172.%;
+    do
+        _pExecSQL "${_connection-}" \
+<<_EOF_
+GRANT
+    ALL PRIVILEGES
+    ON ${_database-}.*
+    TO ${_user-}@'${_host-}'
+    IDENTIFIED BY '${_passwd-}'
+;
+_EOF_
+        _pAddToBeCleaned "DB_USER: ${_user-}@${_host-} ${_connection-}"
+    done
+}
+
+function _pBackupDatabaseIfExists () {
+    local _database=${1-}
+    local _connection=${2-}
+
+    _pIsDatabaseExists ${_database-} ${_connection-} \
+        || return
+    local _dirBak="${_context-}/_bak"
+    [[ -d ${_dirBak-} ]] \
+        || mkdir -p ${_dirBak-}
+    [[ ! -f "${_dirBak-}/.dockerignore" ]] \
+        && echo '*' > "${_dirBak-}/.dockerignore"
+    _pDumpDatabase ${_database-} ${_connection-} \
+        | gzip \
+        > ${_dirBak-}/mysqldump-${_database}-$(date '+%Y%m%d-%H%M').tgz
+}
+
+function _pDumpDatabase () {
+    local _database=${1-}
+    local _connection=${2-}
+    local _host=${_connection##*@}
+    local _user=${_connection%@*}
+    local _passwd=${_user#*:}
+    _user=${_user%%:*}
+
+    if [[ \
+        "${_database-}" \
+        && "${_connection-}" \
+    ]]; then
+        :
+    else
+        _pWarn "Insufficient arguments: ${_database-} ${_connection-}" 
+        exit 1
+    fi
+
+    if _pIsDatabaseExists ${_database-} "${_connection-}"; then 
+        :
+    else
+        return 1
+    fi
+    
+    [[ "$VERBOSE" ]] \
+        && cat <<_EOF_ >&2
+    mysqldump \
+        --host=${_host-} \
+        --user=${_user-} \
+        --password=${_passwd-} \
+        --opt \
+        --single-transaction \
+        --events \
+        --default-character-set=binary \
+        --add-drop-database \
+        --add-drop-table \
+        ${_database-}
+_EOF_
+    mysqldump \
+        --host=${_host-} \
+        --user=${_user-} \
+        --password=${_passwd-} \
+        --opt \
+        --single-transaction \
+        --events \
+        --default-character-set=binary \
+        --add-drop-database \
+        --add-drop-table \
+        ${_database-}
+}
+
+function _pHas() {
+    local _list="${1-}"
+    local _elem="${2-}"
+    [[ -z "${_list-}" || -z "${_elem-}" ]] \
+        && return 1
+    echo "${_list-}" | tr ' ' '\n' | grep -q '^'${_elem-}'$' \
+        || return 1
+}
+
+function _pDropDatabaseAndUserIfPermitted () {
+    local _user=${1-}
+    local _database=${2-}
+    local _connection=${3-}
+    if ! _pHas "${_ICONF[PERMIT_CLEANUP]-}" DATABASE; then
+        return
+    fi
+    if [[ "${_user-}" && "${_database-}" && "${_connection-}" ]]; then
+        :
+    else
+        _pWarn "Insufficient arguments: ${_user-} ${_database-} ${_connection-}" 
+        exit 1
+    fi
+
+    for _host in localhost 127.0.0.1 172.%;
+    do
+        _pDropDBUserIfExists \
+            ${_user-}@${_host-} \
+            ${CONN-} || _pWarn $?
+    done
+
+    _pDropDatabaseIfExists \
+        ${_database-} \
+        ${CONN-}
+}
+
+function _pMakeFileWithPreservation () {
+    local _file="${1-}"
+    if [[ -z "${_file}" ]]; then
+        _warn "Insufficient arguments: ${_file-}"
+        exit 1
+    fi
+
+    local _dir="${_file%/*}"
+    [[ ! -d "${_dir-}" ]] \
+        && mkdir -p ${_dir-}
+
+    local _tempFile=$( mktemp )
+    cat - > ${_tempFile-}
+    if [[ -f "${_file-}" ]]; then
+        if [[ -f "${_file-}.save" ]]; then
+            diff \
+                --ignore-tab-expansion \
+                --ignore-trailing-space \
+                --ignore-space-change \
+                --ignore-blank-lines \
+                "${_file-}.save" "${_file-}" > /dev/null \
+                    || cp "${_file-}" "${_file-}.save"
+        else
+            cp "${_file-}" "${_file-}.save"
+        fi
+    fi
+    mv ${_tempFile-} ${_file-}
+    _pAddToBeCleaned "FILE: ${_file-}"
+}
+
+###
+### recker clean
+###
+function _recker-clean() {
+    local _longOpts
+    while [[ \
+        -n "${1-}" \
+        && "${1-}" =~ ^--[a-zA-Z0-9_][a-zA-Z0-9_=\"-][a-zA-Z0-9_=\"-]* \
+    ]]
+    do
+       _longOpts="${_longOpts-} ${1-}"
+       shift
+    done
+    local -A __opts=$( _getOptsArray ${_longOpts-} )
+
+    local _optMore
+    if [[ "${__opts[more]-}" ]]; then
+        _optMore=1
+    fi
+
+    # not implemented
+    local _optMust
+    if [[ "${__opts[ignore-log-absence]-}" ]]; then
+        _optMust=1
+    fi
+    
+    local _units
+    if [[ "${__opts[units]-}" ]]; then
+        _units="${__opts[units]//,/ }"
+    fi
+
+    local _context=''
+    if [[ "${1-}" ]]; then
+        _context="${1-}"
+        shift
+        if [[ \
+            -d "${_context-}" \
+            && "${_context-}" =~ ^[^/] \
+        ]]; then
+            _context=$(cd ${_context-} && pwd)
+        fi
+    else
+        _context=$( \
+            ${_RECKER_ABS-} _comp dockerfile-and-images-name \
+            | ${_PERCOL-} --prompt='Recker clean' \
+        )
+    fi
+
+    if [[ ! "${_context-}" ]]; then
+        _warn "specify context directory or image name..."
+        return 1
+    fi
+    local _howMany=(${_context-})
+    if [[ ${#_howMany[@]} -gt 1 ]]; then
+        _warn "too much target to cleaning..."
+        return 1
+    fi
+
+    local _maintainerName="${USER-}"
+    [[ -n "${_CONF[DOCKER_MAINTAINER_NAME]-}" ]] \
+        && _maintainerName="${_CONF[DOCKER_MAINTAINER_NAME]}"
+    local _imgName="${_context-}"
+    local _imgToExec=''
+    local _isUnderRecker=0
+    local _imgConfigFile=''
+    local -A _ICONF
+    if [[ -d "${_imgName-}" ]]; then
+        _imgName="${_imgName##*/}"
+        _imgToExec="${_maintainerName-}/${_imgName-}"
+        _isUnderRecker=1
+        _imgConfigFile="${_context-}/config.sh"
+        if [[ -r "${_imgConfigFile-}" ]]; then
+            source <(
+                grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
+                | grep -v '^SET[[:blank:]]' \
+                | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
+            )
+            local _envs=$(
+                grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
+                | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1=\2|;' \
+                    -e 's| |__|g'
+            )
+            _envs=$(
+                echo "${_envs-}" \
+                | grep -v '^$' \
+                | sed -e 's|^|-e |' \
+                | tr '\n' ' ' \
+            )
+        fi
+    else
+        _imgToExec="${_imgName-}"
+        _imgName="${_imgName//\//_}"
+        _imgName="${_imgName//:/_}"
+    fi
+
+    if [[ \
+        ! -f ${_context-}/.tobecleaned \
+        && -z "${_optMust-}" \
+    ]]; then
+        _warn 'nothing to clean up'
+        return
+    fi
+
+    local -A _p
+    _p[NAME_IMAGE]="${_imgName-}"
+    _p[NAME_MAINTAINER]="${_maintainerName-}"
+    _p[DIR_DOCKER_BASE]="${_CONF[DIR_DOCKER_BASE_GLOBAL]-}"
+    [[ $(_getEuid) -ne 0 ]] \
+        && _p[DIR_DOCKER_BASE]="${_CONF[DIR_DOCKER_BASE_THISUSER]-}"
+    _p[DIR_DOCKER_VOLUMES]="${_p[DIR_DOCKER_BASE]-}/${_CONF[DIR_DOCKER_VOLUMES]-}"
+
+    # PERMIT_CLEANUP="CONTAINER IMAGE VOLUME USER DB_USER DATABASE"
+    # _CONF[PERMIT_CLEANUP]
+
+    local _dirBak="${_context-}/_bak"
+    function __makeBackupDirectory () {
+        [[ ! -d "${_dirBak-}" ]] && mkdir -p ${_dirBak-}
+        [[ ! -f "${_dirBak-}/.dockerignore" ]] \
+            && echo '*' > "${_dirBak-}/.dockerignore"
+    }
+
+    function __eraseRemoveEntry () {
+        local _target="$@"
+        [[ ! "${_target-}" ]] && return
+        [[ ! -f ${_context-}/.tobecleaned ]] && return
+        sed -i -e "s|^${_target-}\$||g" \
+            ${_context-}/.tobecleaned
+    }
+
+    _mention "Started to clean up docker context resources..."
+
+    if _has "${_ICONF[PERMIT_CLEANUP]-}" CONTAINER; then
+        ! _has "${_units-}" CONTAINER \
+            || {
+                _mention " - containers..."
+                local _containerToKill
+                for _containerToKill in \
+                    $( \
+                        ${_DOCKER-} ps -a \
+                        | tail -n +2 \
+                        | grep '^[^[:blank:]]\{1,\}[[:blank:]]\{1,\}'"${_maintainerName-}/${_imgName-}" \
+                        | sed -e 's/^.*[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\)[[:blank:]]\{0,\}$/\1/'
+                    )
+                do
+                    __eraseRemoveEntry "CONTAINER: ${_containerToKill-}"
+                    recker stop-rm ${_containerToKill-}
+                done
+            }
+    fi
+
+    if _has "${_ICONF[PERMIT_CLEANUP]-}" IMAGE; then
+        ! _has "${_units-}" IMAGE \
+            || {
+                _mention " - images ( including garbages )..."
+                local _targetImage
+                for _targetImage in \
+                    "$( grep '^IMAGE:' ${_context-}/.tobecleaned | cut -d ' ' -f 2 )"
+                do
+                    [[ "${_targetImage-}" ]] \
+                        && ${_DOCKER-} rmi ${_targetImage}
+                    __eraseRemoveEntry "IMAGE: ${_targetImage-}"
+                done
+                for _targetImage in \
+                    "$( ${_DOCKER-} images | grep '^<none>' | awk '{print $3}' )"
+                do
+                    [[ "${_targetImage-}" ]] \
+                        && ${_DOCKER-} rmi ${_targetImage}
+                done
+            }
+    fi
+
+    if _has "${_ICONF[PERMIT_CLEANUP]-}" VOLUME; then
+        ! _has "${_units-}" VOLUME \
+            || {
+                _mention " - shared volumes..."
+                local _volumeDir
+                for _volumeDir in \
+                    $( \
+                        grep '^VOLUME:' ${_context-}/.tobecleaned | cut -d ' ' -f 2
+                    )
+                do
+                    [[ ${_volumeDir} = '/var/recker/log' ]] \
+                        && continue
+                    if [[ ! -d ${_volumeDir} ]]; then
+                        _mention "No such directory: ${_volumeDir}, skipped."
+                        continue
+                    fi
+                    if \
+                        _has "${_ICONF[BACKUP_BEFORE_CLEANUP]-}" VOLUME \
+                        && [[ "${_optMore-}" -ne 1 ]] ;
+                    then
+                        __makeBackupDirectory
+                        local _tgzName="${_volumeDir#/}"
+                        _tgzName="${_tgzName//\//_}.tgz"
+                        _mention "Preserving volume: ${_volumeDir}"
+                        tar czf "${_dirBak-}/${_tgzName-}" ${_volumeDir} 2>&1 \
+                            | egrep -v '(Removing leading)'
+                    fi
+                    /bin/rm -rf ${_volumeDir}
+                    __eraseRemoveEntry "VOLUME: ${_volumeDir}"
+                done
+                local _imagesVolumeTopDir=${_p[DIR_DOCKER_VOLUMES]-}/${_p[NAME_IMAGE]-}
+                if [[ \
+                    -n "${_imagesVolumeTopDir-}" \
+                    && "${_imagesVolumeTopDir-}" != '/' \
+                    && -d ${_imagesVolumeTopDir-} \
+                    && $( find ${_imagesVolumeTopDir-} -type f | wc -l ) -le 0 \
+                ]]; then
+                    /bin/rm -rf ${_imagesVolumeTopDir-}
+                fi
+            }
+    fi
+
+    if _has "${_ICONF[PERMIT_CLEANUP]-}" USER; then
+        ! _has "${_units-}" USER \
+            || {
+                _mention " - host-side users..."
+                local _addedUser
+                for _addedUser in \
+                    $( \
+                        grep '^USER:' ${_context-}/.tobecleaned | cut -d ' ' -f 2
+                    )
+                do
+                    if \
+                        grep -q "^${_addedUser-}:" /etc/passwd \
+                        && [[ \
+                            1000 \
+                            -le \
+                            $( grep "^${_addedUser-}:" /etc/passwd | cut -d : -f 3 ) \
+                        ]]
+                    then
+                        (
+                            userdel \
+                                --remove \
+                                ${_addedUser-} \
+                                2>&1 \
+                                | egrep -v '(mail spool.*not found)'
+                        )
+                        if ! grep -q "^${_addedUser-}:" /etc/passwd; then
+                            _mention "Removed user: ${_addedUser-}" 
+                            __eraseRemoveEntry "USER: ${_addedUser-}"
+                        fi
+                    fi
+                done
+            }
+    fi
+
+    if _has "${_ICONF[PERMIT_CLEANUP]-}" DATABASE; then
+        ! _has "${_units-}" DATABASE \
+            || {
+                _mention " - database..."
+                local _addedDatabase
+                for _addedDatabase in \
+                    $( \
+                        grep '^DATABASE:' ${_context-}/.tobecleaned \
+                        | cut -d ' ' -f 2-3 \
+                        | tr ' ' '#'
+                    )
+                do
+                    if \
+                        _has "${_ICONF[BACKUP_BEFORE_CLEANUP]-}" DATABASE \
+                        && [[ "${_optMore-}" -ne 1 ]] ;
+                    then
+                        __makeBackupDirectory
+                        _pDumpDatabase \
+                            ${_addedDatabase//#/ } \
+                            | gzip \
+                            > ${_dirBak-}/mysqldump-${_addedDatabase%#*}.tgz
+                    fi
+                    _pDropDatabaseIfExists ${_addedDatabase//#/ } \
+                        && __eraseRemoveEntry "DATABASE: ${_addedDatabase//#/ }"
+                done
+            }
+    fi
+
+    if _has "${_ICONF[PERMIT_CLEANUP]-}" DB_USER; then
+        ! _has "${_units-}" DB_USER \
+            || {
+                _mention " - database users..."
+                local _addedDatabaseUser
+                for _addedDatabaseUser in \
+                    $( \
+                        grep '^DB_USER:' ${_context-}/.tobecleaned \
+                            | cut -d ' ' -f 2-3 \
+                            | tr ' ' '#'
+                    )
+                do
+                    _pDropDBUserIfExists ${_addedDatabaseUser//#/ } \
+                        && __eraseRemoveEntry "DB_USER: ${_addedDatabaseUser//#/ }"
+                done
+            }
+    fi
+
+    if _has "${_ICONF[PERMIT_CLEANUP]-}" FILE; then
+        ! _has "${_units-}" FILE \
+            || {
+                _mention " - newly generated files..."
+                local _addedFile
+                for _addedFile in \
+                    $( \
+                        grep '^FILE:' ${_context-}/.tobecleaned \
+                        | cut -d ' ' -f 2
+                    )
+                do
+                    if [[ -f "${_addedFile-}" ]]; then
+                        /bin/rm -f ${_addedFile-}
+                        __eraseRemoveEntry "FILE: ${_addedFile-}"
+                    fi
+                done
+            }
+    fi
+
+    if _has "${_ICONF[PERMIT_CLEANUP]-}" DIR; then
+        ! _has "${_units-}" DIR \
+            || {
+                _mention " - newly generated directories..."
+                local _genDir
+                for _genDir in \
+                    $( \
+                        grep '^DIR:' ${_context-}/.tobecleaned \
+                        | cut -d ' ' -f 2
+                    )
+                do
+                    if [[ -d "${_genDir-}" ]]; then
+                        if ! /bin/rmdir ${_genDir-}; then
+                            _warn "${_genDir-} is not empty. Skipped."
+                            continue
+                        fi
+                        __eraseRemoveEntry "DIR: ${_genDir-}"
+                    fi
+                done
+            }
+    fi
+
+    grep -q -v '^$' ${_context-}/.tobecleaned \
+        || rm -f ${_context-}/.tobecleaned
+
+    if [[ \
+        -d ${_dirBak-} \
+        && ${_dirBak-} != '/' \
+        && "${_optMore-}" -eq 1 \
+    ]]; then
+        _mention " - backup files..."
+        /bin/rm -rf ${_dirBak-}
+    fi
+
+    _mention "Done."
+}
+
+###
+### recker build
 ###
 function _recker-build() {
     local _context=''
@@ -629,24 +1551,65 @@ function _recker-build() {
     fi
 
     local -A _ICONF
-    local -A _envs
-    _envs['_Z']='Z'
+    local -A _p
+    _p['_Z']='Z'
+    local -a _envsOnBuild
     local _imgConfigFile="${_context-}/config.sh"
-    _makeSureDir "${_context-}/_upload" || :
+
+    [[ ! "${DEBUG-}" && -f ${_context-}/.tobecleaned ]] \
+        && _recker-clean \
+            --units="CONTAINER,VOLUME,USER,DB_USER,DATABASE,FILE,DIR" \
+            ${_context-}
+    function __addToBeCleaned () {
+        echo "$@" >> ${_context-}/.tobecleaned
+    }
+
+    if _makeSureDir "${_context-}/_upload"; then
+        __addToBeCleaned "DIR: ${_context-}/_upload"
+    else
+        _die "Cannot mkdir ${_context-}/_upload"
+    fi
+
+    if \
+        [[ ! -f "${_context-}/container_services.sh" ]] \
+        || ! grep -v \
+            -e '^[[:blank:]]\{0,\}#\{1,\}' \
+            -e '^[[:blank:]]\{0,\}$' \
+                "${_context-}/container_services.sh"
+    then
+        _t=$( eval "printf %s \"\${_T_CONTAINER_SERVICES_SH[@]}\"" )
+        echo "${_t-}" > "${_context-}/container_services.sh"
+        __addToBeCleaned "FILE: ${_context-}/container_services.sh"
+    fi
+
+    [[ -f "${_context-}/_upload/envs_onbuild.sh" ]] \
+        && rm -f "${_context-}/_upload/envs_onbuild.sh"
+    __addToBeCleaned "FILE: ${_context-}/_upload/container_lib.sh"
     if [[ -r "${_imgConfigFile-}" ]]; then
         source <( \
             grep '^[A-Z0-9_]\{1,\}=.*$' "${_imgConfigFile-}" \
             | grep -v '^SET[[:blank:]]' \
             | sed -e 's|^\([A-Z0-9_]\{1,\}\)\(=.*\)$|_ICONF[\1]\2|' \
         )
+        _envsOnBuild=$(
+            grep '^[A-Z0-9_]\{1,\}=.\{1,\}$' "${_imgConfigFile-}" \
+            | egrep '^(RUN_AS_SERVICE|VOLUMES|PORTS|LINKS|EXEC|SWAPPY|OOMK_CANCEL)' \
+            | sed -e 's| |__|' -e 's|^|--build-arg |' \
+            | tr '\n' ' ' \
+        )
         source <( \
             grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
-            | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|_envs[\1]=\2|;' \
+            | sed \
+                -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)=\("\{0,\}.*"\{0,\}\)$|_p[\1]=\2|;' \
                 -e 's| |__|g' \
         )
+        grep -v '^SET[[:blank:]]' "${_imgConfigFile-}" \
+            >> "${_context-}/_upload/envs_onbuild.sh"
         grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
-            | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1="\2"|;' \
-            > "${_context-}/_upload/envs_onbuild.sh"
+            | sed \
+                -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)=\("\{0,\}.*"\{0,\}\)$|\1=\2|;' \
+                -e 's| |__|g' \
+            >> "${_context-}/_upload/envs_onbuild.sh"
         echo "DOCKER_HOST_IP=\"$(_getHostIPv4)\"" \
             >> "${_context-}/_upload/envs_onbuild.sh"
     fi
@@ -656,23 +1619,60 @@ function _recker-build() {
     [[ -n "${_CONF[DOCKER_MAINTAINER_NAME]-}" ]] \
         && _maintainerName="${_CONF[DOCKER_MAINTAINER_NAME]}"
 
+    _p[NAME_IMAGE]="${_imgName-}"
+    _p[NAME_MAINTAINER]="${_maintainerName-}"
+    _p[DIR_DOCKER_BASE]="${_CONF[DIR_DOCKER_BASE_GLOBAL]-}"
+    [[ $(_getEuid) -ne 0 ]] \
+        && _p[DIR_DOCKER_BASE]="${_CONF[DIR_DOCKER_BASE_THISUSER]-}"
+    _p[DIR_DOCKER_VOLUMES]="${_p[DIR_DOCKER_BASE]-}/${_CONF[DIR_DOCKER_VOLUMES]-}"
+
     _mention "Started building: ${_context-}..."
     local _fn="${_context-}/pre_build.sh"
     if [[ -x "${_fn-}" ]]; then
         _mention "running pre_build.sh..."
-        ENVS_DEF=$(declare -p _envs) ${_context-}/pre_build.sh
+        [[ ${DEBUG-} ]] && \
+            _mention "You are in DEBUG mode. Skipped."
+        [[ ${DEBUG-} ]] || ( \
+            export -f $( declare -f | grep '^_p[A-Z].*\(\)' | sed 's/().*$//' )
+            export _p
+            recker _print_container_lib_sh \
+                > "${_context-}/_upload/container_lib.sh"
+            __addToBeCleaned "FILE: ${_context-}/_upload/container_lib.sh"
+            cd ${_context-}
+            source pre_build.sh
+        )
     fi
+
     _mention "running 'docker build'..."
-    ${_DOCKER-} build \
-        ${_CONF[DOCKER_BUILD_OPT]} \
-        -t "${_maintainerName-}/${_imgName-}" \
-        ${_context-}
+    if [[ ${DEBUG-} ]]; then
+        cat <<_EOF_
+            ${_DOCKER-} build \
+                ${_CONF[DOCKER_BUILD_OPT]} \
+                ${_envsOnBuild-} \
+                -t "${_maintainerName-}/${_imgName-}" \
+                ${_context-}
+_EOF_
+    else
+        ${_DOCKER-} build \
+            ${_CONF[DOCKER_BUILD_OPT]} \
+            ${_envsOnBuild-} \
+            -t "${_maintainerName-}/${_imgName-}" \
+            ${_context-} \
+        && __addToBeCleaned "IMAGE: ${_maintainerName-}/${_imgName-}"
+    fi
     _fn="${_context-}/post_build.sh"
     if [[ -x "${_fn-}" ]]; then
         _mention "running post_build.sh..."
-        ENVS_DEF=$(declare -p _envs) ${_context-}/post_build.sh
+        [[ ${DEBUG-} ]] || ( \
+            export -f $( declare -f | grep '^_p[A-Z].*\(\)' | sed 's/().*$//' )
+            export _p
+            cd ${_context-}
+            source post_build.sh
+        )
     fi
     _mention "build has completed."
+    [[ -f "${_context-}/_upload/envs_onbuild.sh" ]] \
+        && __addToBeCleaned "FILE: ${_context-}/_upload/envs_onbuild.sh"
 }
 
 function _recker-RUN-FGorBG() {
@@ -736,7 +1736,8 @@ function _recker-RUN-FGorBG() {
             )
             local _envs=$(
                 grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
-                | sed -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1=\2|;' \
+                | sed \
+                    -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)="\(.*\)"$|\1=\2|;' \
                     -e 's| |__|g'
             )
             _envs=$(
@@ -761,6 +1762,12 @@ function _recker-RUN-FGorBG() {
         _warn "no such image built or available..."
         return 1
     fi
+
+    local _otherOptions
+    [[ "${_ICONF[SWAPPY]-}" ]] \
+        && _otherOptions+=" --memory-swappiness=${_ICONF[SWAPPY]-}"
+    [[ "${_ICONF[OOMK_CANCEL]-}" ]] \
+        && _otherOptions+=" --oom-kill-disable=true"
 
     local _containerName="${_imgName-}"
     local _regexGetDockerCName='s|^\([^[:blank:]]\{1,\}\)[[:blank:]].*[[:blank:]]\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}$|\2|'
@@ -802,6 +1809,10 @@ function _recker-RUN-FGorBG() {
         fi
     fi
 
+    function __addToBeCleaned () {
+        echo "$@" >> ${_context-}/.tobecleaned
+    }
+
     local _ports=''
     local _volumes=''
     local _links=''
@@ -822,12 +1833,17 @@ function _recker-RUN-FGorBG() {
     [[ $(_getEuid) -ne 0 ]] \
         && _baseDir="${_CONF[DIR_DOCKER_VOLUMES_THISUSER]-}/${_contextLastElem-}"
     local _localDir=''
-    if [[ "${_ICONF[VOLUMES]-}" ]]; then
-        for i in ${_ICONF[VOLUMES]-}
+    local _tempVolumes="${_ICONF[VOLUMES]-}"
+    grep -q \
+        -e '^[^#]\{0,\}_cSetScriptFor1stRuntime' \
+        "${_context-}/container_build.sh" \
+            && _tempVolumes+=' /var/recker/log'
+    if [[ "${_tempVolumes-}" ]]; then
+        for i in ${_tempVolumes-}
         do
             _localDir="${_baseDir-}$i"
             if _makeSureDir ${_localDir-}; then
-                :
+                __addToBeCleaned "VOLUME: ${_localDir-}"
             else
                 _warn "Can't make directory : ${_localDir-}"
                 return 1
@@ -888,11 +1904,12 @@ function _recker-RUN-FGorBG() {
         ${_ports-} \
         ${_links-} \
         ${_volumes-} \
+        ${_otherOptions-} \
         "${_imgToExec-}" \
         ${_executable-}
 _EOF_
 
-    (
+    [[ "${DEBUG-}" ]] || (
         cd ${_context-}
         [[ "${_CONF[COMMAND_PRE_RUN]-}" ]] \
             && bash -c "${_CONF[COMMAND_PRE_RUN]-}"
@@ -909,8 +1926,30 @@ _EOF_
             ${_ports-} \
             ${_links-} \
             ${_volumes-} \
+            ${_otherOptions-} \
             "${_imgToExec-}" \
             ${_executable-}
+
+        if 
+            ${_DOCKER-} exec "${_containerName-}" \
+                ls /var/recker/usr/container_runonce.sh > /dev/null 2>&1
+        then
+            _mention "Waiting until container's 1st time preparation script finishes jobs..."
+            local _cc=0
+            while true ;
+            do
+                ${_DOCKER-} exec "${_containerName-}" /usr/local/bin/is_preparation_done \
+                    && break
+                sleep 10
+                _cc=$(($_cc + 10))
+                if [[ ${_cc-} -ge 60 ]]; then
+                    _cc=0
+                    echo -n o
+                fi
+            done
+            echo ''
+            echo '...done.'
+        fi
 
         cd ${_context-}
         [[ "${_CONF[COMMAND_POST_RUN]-}" ]] \
@@ -1481,6 +2520,9 @@ function _recker() {
         build)
             _list=$( $_RECKER _comp dockerfiles )
             ;;
+        clean)
+            _list=$( $_RECKER _comp dockerfiles )
+            ;;
         run|run-fg|run-bg)
             _list=$( $_RECKER _comp dockerfile-and-images-name )
             ;;
@@ -1517,6 +2559,10 @@ function _recker-bashcompletion() {
     printf %s "${_BASH_COMPLETION[@]//%%RECKER_ABS%%/$_RECKER_ABS}"
 }
 # source <(recker bashcompletion)
+
+function _recker-_print_container_lib_sh() {
+    echo "$( eval "printf %s \"\${_B_CONTAINER_LIB_SH[@]}\"" )"
+}
 
 function _recker-_comp() {
     local i
