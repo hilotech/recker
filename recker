@@ -5,7 +5,7 @@
 @DESCRIPTION Docker tiny helper
 @AUTHOR HiLoTECH
 @URL http://www.hilotech.jp/
-@DATE 2016/03/05
+@DATE 2016/03/11
 @@
 
 set -e
@@ -16,9 +16,21 @@ VERBOSE="${VERBOSE-}"
 [[ -n "${VERBOSE-}" ]] \
     && set -v
 
-readonly _VERSION='0.9.20160305'
+readonly _VERSION='0.9.20160311'
 readonly _RECKER_ABS=$( readlink -f $0 )
 readonly _RECKER="${_RECKER_ABS##*/}"
+
+_DOCKER_VERSION=$( \
+    _ar=( \
+        $( \
+            docker --version \
+                | cut -d ' ' -f 3 \
+                | cut -d ',' -f 1 \
+                | cut --output-delimiter=' ' -d '.' -f 1- \
+        ) \
+    ); \
+    echo $(( _ar[0]*10000+_ar[1]*100+_ar[2]*1 )) \
+    )
 
 mapfile _USAGE <<'_EOF_'
 NAME
@@ -1822,6 +1834,10 @@ function _recker-build() {
             | sed -e 's| |__|' -e 's|^|--build-arg |' \
             | tr '\n' ' ' \
         )
+        if [[ ${_DOCKER_VERSION-} -lt 10901 ]]; then
+            _warn "build-arg option omitted because Docker version is lesser than 1.9.1"
+            _envsOnBuild=''
+        fi
         source <( \
             grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
             | sed \
@@ -2372,7 +2388,7 @@ function _recker-explode() {
     local _cmd
     for _cmd in shar uudecode dialog
     do
-        if ! which ${_cmd} >/dev/null ; then
+        if ! which ${_cmd} >/dev/null 2>/dev/null ; then
             _die "There is not '${_cmd}' command. Install it, please."
         fi
     done
