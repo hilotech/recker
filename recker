@@ -5,7 +5,7 @@
 @DESCRIPTION Docker tiny helper
 @AUTHOR HiLoTECH
 @URL http://www.hilotech.jp/
-@DATE 2016/03/01
+@DATE 2016/03/05
 @@
 
 set -e
@@ -16,7 +16,7 @@ VERBOSE="${VERBOSE-}"
 [[ -n "${VERBOSE-}" ]] \
     && set -v
 
-readonly _VERSION='0.8.20160301'
+readonly _VERSION='0.9.20160305'
 readonly _RECKER_ABS=$( readlink -f $0 )
 readonly _RECKER="${_RECKER_ABS##*/}"
 
@@ -138,6 +138,7 @@ declare -A _CONF=(
 declare -r -a _SUB_COMMANDS=(
     'build' 'run' 'run-fg' 'run-bg' 'clean'
     'scaffold' 'enter'
+    'implode' 'explode'
     'images' 'images-a' 'ps' 'ps-a' 'top'
     'rmi' 'rmi-a'
     'stop' 'stop-a' 'kill' 'kill-a'
@@ -866,9 +867,9 @@ function _cTarSharedVolumes() {
         /var/recker/tar/shared_dirs.tgz \
         --directory / \
         --preserve-permissions \
-        --acls \
-        --xattrs \
         $@
+#        --acls \
+#        --xattrs \
 }
 
 # Untar shared volumes
@@ -880,9 +881,9 @@ function _cUntarSharedVolumes() {
         --directory / \
         --preserve-permissions \
         --overwrite \
-        --overwrite-dir \
-        --acls \
-        --xattrs
+        --overwrite-dir
+#        --acls \
+#        --xattrs
 }
 
 #
@@ -953,13 +954,17 @@ _EOF_BUILT_IN_FILE
 mapfile _B_RECOMMEND_SCRIPT_ALPINE <<'_EOF_BUILT_IN_FILE'
 _cIsDist alpine \
 && {
+    sed -i \
+        -e 's/#rc_sys=""/rc_sys="lxc"/g' \
+        -e 's/^#\(rc_logger="YES"\)$/\1/' \
+            /etc/rc.conf
+    echo 'rc_provide="loopback net"' >> /etc/rc.conf
     sed -i 's|^tty|#tty|' /etc/inittab
     echo 'id:3:initdefault:' >> /etc/inittab
     echo 'Asia/Tokyo' > /etc/timezone
     cat <<'_EOF' > /etc/network/interfaces
 auto lo
 iface lo inet loopback
-
 allow-hotplug eth0
 iface eth0 inet dhcp
 _EOF
@@ -979,7 +984,6 @@ _EOF_BUILT_IN_FILE
 mapfile _B_RECOMMEND_SCRIPT_SERVICES_ALPINE <<'_EOF_BUILT_IN_FILE'
 _cSetScriptContainerServices <<'______SCRIPT_FOR_SERVICES'
 ip addr flush dev lo
-ip addr flush dev eth0
 rc-service networking start
 ______SCRIPT_FOR_SERVICES
 _EOF_BUILT_IN_FILE
@@ -1064,7 +1068,10 @@ function _pExecSQL () {
     local _additional_args="$@"
     [[ -n "${_additional_args-}" ]] \
         && _additional_args='--silent'
-    /usr/bin/mysql \
+    local _sql=$( cat - )
+    [[ -n "${VERBOSE-}" ]] \
+        && _warn "$_sql"
+    echo "$_sql" | /usr/bin/mysql \
         ${_additional_args-} \
         --host=${_host-} \
         --user=${_user-} \
@@ -1082,6 +1089,7 @@ function _pIsDatabaseExists () {
         _pWarn "Insufficient arguments: ${_database-} ${_connection-}"
         exit 1
     fi
+
 
     if [[ -n $( \
         echo "SHOW DATABASES LIKE '${_database-}';" \
@@ -1162,7 +1170,7 @@ function _pDropDatabaseIfExists () {
         exit 1
     fi
 
-    echo "DROP DATABASE IF EXISTS ${_database-};" \
+    echo "DROP DATABASE IF EXISTS \`${_database-}\`;" \
         | _pExecSQL "${_connection-}"
 }
 
@@ -1198,7 +1206,7 @@ function _pCreateDatabaseAndUserIfNotExists () {
     _pExecSQL "${_connection-}" \
 <<_EOF_
 CREATE
-    DATABASE ${_database-}
+    DATABASE \`${_database-}\`
     DEFAULT CHARACTER SET utf8
 ;
 _EOF_
@@ -1210,8 +1218,8 @@ _EOF_
 <<_EOF_
 GRANT
     ALL PRIVILEGES
-    ON ${_database-}.*
-    TO ${_user-}@'${_host-}'
+    ON \`${_database-}\`.*
+    TO '${_user-}'@'${_host-}'
     IDENTIFIED BY '${_passwd-}'
 ;
 _EOF_
@@ -1462,9 +1470,6 @@ function _recker-clean() {
         && _p[DIR_DOCKER_BASE]="${_CONF[DIR_DOCKER_BASE_THISUSER]-}"
     _p[DIR_DOCKER_VOLUMES]="${_p[DIR_DOCKER_BASE]-}/${_CONF[DIR_DOCKER_VOLUMES]-}"
 
-    # PERMIT_CLEANUP="CONTAINER IMAGE VOLUME USER DB_USER DATABASE"
-    # _CONF[PERMIT_CLEANUP]
-
     local _dirBak="${_context-}/_bak"
     function __makeBackupDirectory () {
         [[ ! -d "${_dirBak-}" ]] && mkdir -p ${_dirBak-}
@@ -1476,8 +1481,10 @@ function _recker-clean() {
         local _target="$@"
         [[ ! "${_target-}" ]] && return
         [[ ! -f ${_context-}/.tobecleaned ]] && return
-        sed -i -e "s|^${_target-}\$||g" \
-            ${_context-}/.tobecleaned
+        sed -i \
+            -e "s|^${_target-}\$||g" \
+            -e '/^$/d' \
+                ${_context-}/.tobecleaned
     }
 
     [[ -z "${_units-}" ]] \
@@ -1764,8 +1771,12 @@ function _recker-build() {
         && _recker-clean \
             --units="CONTAINER,VOLUME,USER,DB_USER,DATABASE,FILE,DIR" \
             ${_context-}
+
     function __addToBeCleaned () {
-        echo "$@" >> ${_context-}/.tobecleaned
+        [[ ! -f ${_context-}/.tobecleaned ]] \
+            && touch ${_context-}/.tobecleaned
+        grep -q "$@" ${_context-}/.tobecleaned \
+            || echo "$@" >> ${_context-}/.tobecleaned
     }
 
     if _makeSureDir "${_context-}/_upload"; then
@@ -2227,6 +2238,257 @@ function _recker-run() {
 #        fi
 #    fi
 #}
+
+###
+### recker implode
+###
+function _recker-implode() {
+    if ! which shar >/dev/null ; then
+        _die 'There is not `shar` command. Install sharutils, please.'
+    fi
+
+    local _longOpts
+    while [[ \
+        -n "${1-}" \
+        && "${1-}" =~ ^--[a-zA-Z0-9_][a-zA-Z0-9_=\"-][a-zA-Z0-9_=\"-]* \
+    ]]
+    do
+       _longOpts="${_longOpts-} ${1-}"
+       shift
+    done
+    local -A __opts=$( _getOptsArray ${_longOpts-} )
+
+    local _context=''
+    if [[ "${1-}" ]]; then
+        _context="${1-}"
+        shift
+        if [[ \
+            -d "${_context-}" \
+            && "${_context-}" =~ ^[^/] \
+        ]]; then
+            _context=$(cd ${_context-} && pwd)
+        fi
+    else
+        _context=$( \
+            ${_RECKER_ABS-} _comp dockerfiles \
+            | ${_PERCOL-} --prompt='Recker implode' \
+        )
+    fi
+
+    if [[ ! "${_context-}" ]]; then
+        _warn "specify context directory..."
+        return 1
+    fi
+    local _howMany=(${_context-})
+    if [[ ${#_howMany[@]} -gt 1 ]]; then
+        _warn "too much target to implode..."
+        return 1
+    fi
+    if [[ ! -d "${_context-}" ]]; then
+        _warn "no such context directory..."
+        return 1
+    fi
+
+    local _targetFile="${1-}"
+    if [[ -z ${_targetFile-} ]]; then
+        _die "Specify target file name for implosion..."
+    fi
+    shift
+
+    local -A _ICONF
+    local -A _p
+    _p['_Z']='Z'
+    local _imgConfigFile="${_context-}/config.sh"
+
+    [[ ! "${DEBUG-}" && -f ${_context-}/.tobecleaned ]] \
+         && _recker-clean \
+             --units="FILE,DIR" \
+             ${_context-}
+
+    local _dirToShar=$( mktemp -d )
+    for _i in \
+        Dockerfile config.sh container_build.sh pre_build.sh post_build.sh \
+        _upload
+    do
+        [[ ! -r ${_context-}/${_i-} ]] \
+            && continue
+        if [[ -d ${_context-}/${_i-} ]]; then
+            cp -r ${_context-}/${_i-} ${_dirToShar-}/
+            continue
+        fi
+        cp ${_context-}/${_i-} ${_dirToShar-}/
+    done
+
+    [[ -f ${_dirToShar}/config.sh ]] \
+        && sed -i \
+            -e 's|^SET[[:blank:]]\{1,\}\([^[:blank:]=]\{1,\}\)=\([^=]\{0,\}\)$|SET \1=|' \
+                ${_dirToShar-}/config.sh
+
+    local _implosionTempFile=$( mktemp )
+    sed -e "s|%%_VERSION%%|${_VERSION-}|" <<'_EOF_' > ${_implosionTempFile-}
+#!/bin/bash
+RECKER=%%_VERSION%%
+if [[ ! ${RECKER_EXPLODE-} ]]; then
+   echo -e "\e[31m$@\e[m This is a template file for recker. Plase call via recker." >&2
+   exit 1
+fi
+#__BEGIN__SHAR__
+_EOF_
+    (
+        cd ${_dirToShar}
+        shar --no-i18n --no-md5-digest * >> ${_implosionTempFile-}
+    )
+
+    local _isSaved=0
+    if [[ -f "${_targetFile-}" ]]; then
+        mv ${_targetFile-} ${_targetFile-}.save \
+            && _isSaved=1
+    fi
+    if ! mv ${_implosionTempFile-} ${_targetFile-}; then
+        _warn "Cannot write: ${_targetFile-} "
+        [[ ${_isSaved-} ]] \
+            && mv ${_targetFile-}.save ${_targetFile-}
+    else
+        _mention "Implosion complete: ${_targetFile-}"
+    fi
+
+    [[ -d ${_dirToShar-} ]] \
+        && /bin/rm -rf ${_dirToShar-}
+    [[ -f ${_implosionFile-} ]] \
+        && /bin/rm ${_implosionTempFile-}
+}
+
+function _recker-explode() {
+    local _longOpts
+    while [[ \
+        -n "${1-}" \
+        && "${1-}" =~ ^--[a-zA-Z0-9_][a-zA-Z0-9_=\"-][a-zA-Z0-9_=\"-]* \
+    ]]
+    do
+       _longOpts="${_longOpts-} ${1-}"
+       shift
+    done
+    local -A __opts=$( _getOptsArray ${_longOpts-} )
+
+    local _templateFilename="${1-}"
+    if [[ -z "${_templateFilename-}" ]]; then
+        _warn "specify template file name..."
+        return 1
+    fi
+    [[ ! -f "${_templateFilename-}" ]] \
+        && _die "No such template file: ${_templateFilename-}"
+    shift
+
+    local __version
+    __version=$( \
+        grep '^RECKER=[0-9\.]\{1,\}$' ${_templateFilename-} \
+            | head -1 \
+            | sed 's|^RECKER=\([0-9]\{1,\}\)$|\1|'
+    )
+    [[ -z ${__version-} ]] \
+        && __version=0
+
+    local __sharLine='#__BEGIN__SHAR__'
+    if \
+        [[ ${__version-} == '0' ]] \
+        && ! grep -q "^${__sharLine-}" ${_templateFilename-} \
+    ; then
+        _die "Unknown data format: ${_templateFilename-}"
+    fi
+
+    local _context="${1-}"
+    if [[ -z "${_context-}" ]]; then
+        _warn "specify target directory name to explode the template..."
+        return 1
+    fi
+    [[ -d "${_context-}" ]] \
+        && _die "Context directory already exist: ${_context-}"
+    shift
+
+    local _dirToUnshar=$( mktemp -d )
+    sed -n "/^${__sharLine-}/,\$ p" ${_templateFilename-} \
+        | tail -n +2 \
+        | ( cd ${_dirToUnshar-}  && /bin/bash )
+
+    local _variableNames=$( \
+        grep '^SET[[:blank:]]\{1,\}\([^[:blank:]=]\{1,\}\)=\([^=]\{0,\}\)$' \
+                ${_dirToUnshar-}/config.sh \
+            | sed 's|^SET[[:blank:]]\{1,\}\([^[:blank:]=]\{1,\}\)=\([^ =]\{0,\}\)$|\1|'
+    )
+
+    local _longestName
+    local _longestLength=0
+    local i
+    for i in ${_variableNames}
+    do
+        if [[ ${_longestLength-} -lt ${#i} ]]; then
+            _longestLength=${#i}
+            _longestName=${i}
+        fi
+    done
+
+    local _undefinedString='__undefined__'
+    local _widgetString
+    local _c=0
+    for i in ${_variableNames}
+    do
+        (( _c++ ))
+        _widgetString+="\
+${i} \
+    ${_c} 1 \
+    ${_undefinedString} \
+        ${_c} ${_longestLength} \
+        ${_longestLength-} 256 \
+"
+    done
+    _widgetString=$( echo ${_widgetString} | sed 's/  / /g' )
+
+    local _dialogTitle='Input variables for new container:'
+    local _dialogFormOpt="\
+$(( _c+9 )) \
+$(( _longestLength+_longestLength )) \
+$(( _c+1 )) \
+"
+
+    local _vars=$( mktemp )
+    dialog \
+        --trim \
+        --stdout \
+        --form \
+            "${_dialogTitle}" \
+            ${_dialogFormOpt} \
+            ${_widgetString} \
+        > ${_vars-}
+
+    local _value
+    _c=0
+    for i in ${_variableNames}
+    do
+        (( _c++ ))
+        _value=$( sed -n "${_c} p" ${_vars-} )
+        [[ ${_value} = ${_undefinedString-} ]] \
+            && _value=''
+        _value=${_value//|/\|}
+        sed -i \
+            -e "s|^\(SET[[:blank:]]\{1,\}${i}=\).*$|\1${_value}|" \
+            ${_dirToUnshar-}/config.sh
+    done
+
+    if [[ -d "${_context-}" ]]; then
+        _warn "Context directory already exist: ${_context-}"
+    else
+        if mv ${_dirToUnshar} ${_context}; then
+            _mention "Explosion complete: ${_context-}"
+        else
+            _warn "Cannot make new context directory: ${_context-}"
+        fi
+    fi
+
+    [[ -d ${_dirToUnshar-} ]] \
+        && /bin/rm -rf ${_dirToUnshar}
+    [[ -f ${_vars-} ]] \
+        && /bin/rm -f ${_vars}
+}
 
 function _recker-rmi() {
     local cids=''
@@ -2758,10 +3020,7 @@ function _recker() {
         rmi-a)
             _list=$( $_RECKER _comp images-a )
             ;;
-        build)
-            _list=$( $_RECKER _comp dockerfiles )
-            ;;
-        clean)
+        build|clean|implode|explode)
             _list=$( $_RECKER _comp dockerfiles )
             ;;
         run|run-fg|run-bg)
