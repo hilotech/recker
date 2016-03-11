@@ -829,6 +829,16 @@ function _cIsDist () {
     return 1
 }
 
+ARCH='unknown'
+MACHINE=$( uname -m ) || ARCH='unknown'
+[[ ${MACHINE-} =~ 'arm' ]]        && ARCH='arm'
+[[ ${MACHINE-} =~ 'x86' ]]        && ARCH='x86'
+[[ ${MACHINE-} =~ 'x86_64' ]]     && ARCH='x86_64'
+function _cIsArch () {
+    [[ ${ARCH-} =~ "${1-}" ]] && return
+    return 1
+}
+
 # File path
 _C_BASHRC=''
 case "${DIST-}" in
@@ -2359,6 +2369,14 @@ _EOF_
 }
 
 function _recker-explode() {
+    local _cmd
+    for _cmd in shar uudecode dialog
+    do
+        if ! which ${_cmd} >/dev/null ; then
+            _die "There is not '${_cmd}' command. Install it, please."
+        fi
+    done
+
     local _longOpts
     while [[ \
         -n "${1-}" \
