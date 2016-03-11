@@ -1837,6 +1837,9 @@ function _recker-build() {
         if [[ ${_DOCKER_VERSION-} -lt 10901 ]]; then
             _warn "build-arg option omitted because Docker version is lesser than 1.9.1"
             _envsOnBuild=''
+            sed -i -e 's|^\(ARG \)|#--\1|' ${_context-}/Dockerfile
+        else
+            sed -i -e 's|^#--\(ARG \)|\1|' ${_context-}/Dockerfile
         fi
         source <( \
             grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
