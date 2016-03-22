@@ -25,6 +25,7 @@ _DOCKER_VERSION=$( \
         $( \
             docker --version \
                 | cut -d ' ' -f 3 \
+                | sed 's|^\([0-9\.]\{1,\}\).*$|\1|' \
                 | cut -d ',' -f 1 \
                 | cut --output-delimiter=' ' -d '.' -f 1- \
         ) \
