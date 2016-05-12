@@ -5,7 +5,7 @@
 @DESCRIPTION Docker tiny helper
 @AUTHOR HiLoTECH
 @URL http://www.hilotech.jp/
-@DATE 2016/03/11
+@DATE 2016/05/12
 @@
 
 set -e
@@ -78,8 +78,8 @@ SUBCOMMANDS
     Show container's IP address.
   get-container-ports
     Show container's mapped ports.
-  get-container-port-http | get-container-port-ssh
-    Same as get-container-ports, but only for http or ssh.
+  get-container-port-http | get-container-port-ssh | get-container-port-smtp
+    Same as get-container-ports for http, ssh and smtp.
   get-containers-names
     Show the list of running container's names.
   top
@@ -139,6 +139,7 @@ declare -A _CONF=(
     [DEVICE_NET]='docker0'
     [AUTOMAP_PORT_HTTP_FROM]=8000
     [AUTOMAP_PORT_SSH_FROM]=2200
+    [AUTOMAP_PORT_SMTP_FROM]=2500
     [EXEC_DOCKER]='docker'
     [EXEC_PERCOL]='percol'
     [EXEC_IP]='ip'
@@ -164,6 +165,7 @@ declare -r -a _SUB_COMMANDS=(
     'get-containers-fqdn-and-port-smtp'
     'get-container-ports' 'get-container-port-http'
     'get-container-port-ssh'
+    'get-container-port-smtp'
     'get-containers-names' 'get-containers-names-and-port-http'
     'usage' 'help' 'man' 'version' 'cut'
     'exec-all'
@@ -511,7 +513,7 @@ RUN \
 RUN \
     [ ! -x /bin/bash ] \
     && if grep -q Alpine /etc/issue; then \
-        apk add --update bash && rm -rf /var/cache/apk/* ; \
+        apk add --update bash tar openrc && rm -rf /var/cache/apk/* ; \
     fi
 
 # Preparation checker
@@ -550,6 +552,7 @@ while true; do sleep 10; done\n\
         > /var/recker/lib/core_init.sh\
     && chmod +x /var/recker/lib/core_init.sh \
     && if grep -q Alpine /etc/issue; then \
+        mkdir -p /etc/local.d || : ; \
         echo -e '#!/bin/bash\n\
 set -eu\n\
 /sbin/start-stop-daemon \
@@ -617,6 +620,7 @@ RUN_AS_SERVICE=
 EXEC=
 AUTOMAP_PORT_HTTP=
 AUTOMAP_PORT_SSH=
+AUTOMAP_PORT_SMTP=
 VOLUMES=
 PORTS=
 LINKS=
@@ -991,6 +995,7 @@ iface lo inet loopback
 allow-hotplug eth0
 iface eth0 inet dhcp
 _EOF
+    apk update
     for i in \
         urandom procfs devfs sysctl dmesg loopback \
         cron syslog local
@@ -1996,6 +2001,7 @@ function _recker-RUN-FGorBG() {
     local _isUnderRecker=0
     local _imgConfigFile=''
     local -A _ICONF
+    local -A _p 
     if [[ -d "${_imgName-}" ]]; then
         _imgName="${_imgName##*/}"
         _imgToExec="${_maintainerName-}/${_imgName-}"
@@ -2018,6 +2024,12 @@ function _recker-RUN-FGorBG() {
                 | grep -v '^$' \
                 | sed -e 's|^|-e |' \
                 | tr '\n' ' ' \
+            )
+            source <( \
+                grep '^SET[[:blank:]]' "${_imgConfigFile-}" \
+                | sed \
+                    -e 's|^SET[[:blank:]]\{1,\}\([^=[:blank:]]\{1,\}\)=\("\{0,\}.*"\{0,\}\)$|_p[\1]=\2|;' \
+                    -e 's| |__|g' \
             )
         fi
     else
@@ -2047,6 +2059,8 @@ function _recker-RUN-FGorBG() {
     [[ "${_ICONF[CAPABILITY]-}" ]] \
         && _capability=${_ICONF[CAPABILITY]-}
     _otherOptions+=" ${_capability-}"
+
+    local -A _C
 
     local _containerName="${_imgName-}"
     local _regexGetDockerCName='s|^\([^[:blank:]]\{1,\}\)[[:blank:]].*[[:blank:]]\([^[:blank:]]\{1,\}\)[[:blank:]]\{1,\}$|\2|'
@@ -2157,12 +2171,21 @@ function _recker-RUN-FGorBG() {
         _mention "HTTP port auto-mapped to: ${_result-}"
         _ports="${_ports-} -p ${_result-}:80 "
         _envs="${_envs-} -e AUTOMAP_PORT_HTTP=\"${_result-}\""
+        _C[PORT_HTTP]=${_result-}
     fi
     if [[ "${_ICONF[AUTOMAP_PORT_SSH]-}" ]]; then
         _result=$( __findUnusedPortFrom ${_CONF[AUTOMAP_PORT_SSH_FROM]-} )
         _mention " SSH port auto-mapped to: ${_result-}"
         _ports="${_ports-} -p ${_result-}:22 "
         _envs="${_envs-} -e AUTOMAP_PORT_SSH=\"${_result-}\""
+        _C[PORT_SSH]=${_result-}
+    fi
+    if [[ "${_ICONF[AUTOMAP_PORT_SMTP]-}" ]]; then
+        _result=$( __findUnusedPortFrom ${_CONF[AUTOMAP_PORT_SMTP_FROM]-} )
+        _mention " SMTP port auto-mapped to: ${_result-}"
+        _ports="${_ports-} -p ${_result-}:25 "
+        _envs="${_envs-} -e AUTOMAP_PORT_SMTP=\"${_result-}\""
+        _C[PORT_SMTP]=${_result-}
     fi
     if [[ "${_ICONF[RUN_AS_SERVICE]-}" -eq 1 ]]; then
         [[ "${_switchFgBg-}" != "${_CONF[DOCKER_RUN_SWITCH_BG]-}" ]] \
@@ -2233,11 +2256,16 @@ _EOF_
             echo '...done.'
         fi
 
+        _C[ADDR]=$( __getContainerIPInfo ${_containerName-} )
+
         cd ${_context-}
         [[ "${_CONF[COMMAND_POST_RUN]-}" ]] \
             && bash -c "${_CONF[COMMAND_POST_RUN]-}"
         [[ "${_ICONF[COMMAND_POST_RUN]-}" ]] \
             && bash -c "${_ICONF[COMMAND_POST_RUN]-}"
+
+        [[ -f 'post_run.sh' ]] \
+            && source post_run.sh
     )
 }
 
@@ -2946,6 +2974,10 @@ function _recker-get-container-port-ssh() {
     [[ -z "${1-}" ]] && return 1
     _recker-get-container-port-ANYTCP $1 22
 }
+function _recker-get-container-port-smtp() {
+    [[ -z "${1-}" ]] && return 1
+    _recker-get-container-port-ANYTCP $1 25
+}
 
 function _recker-get-containers-names() {
     local _result=$( \
@@ -2983,9 +3015,10 @@ function _recker-get-containers-names-and-port-http() {
                 echo "set \$url_for_${i,,} http://localhost:${_port-}/;"
                 ;;
             p)
-                mkdir -p /etc/nginx/recker
-                echo "proxy_pass http://localhost:${_port-};" \
-                    > /etc/nginx/recker/${i,,}
+                ## -- obsolete -- ##
+                #mkdir -p /etc/nginx/recker
+                #echo "proxy_pass http://localhost:${_port-};" \
+                #    > /etc/nginx/recker/${i,,}
                 ;;
             *)
                 echo "$i:${_port-}"
@@ -3070,7 +3103,7 @@ function _recker() {
         top)
             _list=$( $_RECKER _comp ps )
             ;;
-        get-container-ip|get-container-ports|get-container-port-http|get-container-port-ssh)
+        get-container-ip|get-container-ports|get-container-port-http|get-container-port-ssh|get-container-port-smtp)
             _list=$( $_RECKER _comp ps )
             ;;
         select-images)
